@@ -10,5 +10,8 @@
     "build": "node scripts/build.js",
     "dev": "node scripts/build.js && node scripts/dev-server.js",
     "start": "node scripts/dev-server.js"
+  },
+  "dependencies": {
+    "@vercel/analytics": "^2.0.1"
   }
 }

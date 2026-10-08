@@ -1,0 +1,10 @@
+User-agent: *
+Allow: /
+Disallow: /informacoes-entrega
+Disallow: /obrigado
+Disallow: /pages/thank-you.html
+Disallow: /pages/checkout.html
+Disallow: /pages/informacoes-entrega.html
+Disallow: /api/
+
+Sitemap: https://www.hollowpaw.com.br/sitemap.xml
