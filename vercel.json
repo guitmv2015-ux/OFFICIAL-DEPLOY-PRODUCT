@@ -1,0 +1,51 @@
+{
+  "version": 2,
+  "buildCommand": "npm run build",
+  "outputDirectory": "public",
+  "cleanUrls": true,
+  "trailingSlash": false,
+  "redirects": [
+    { "source": "/products/product-1.html", "destination": "/produto/headless-rider", "permanent": true },
+    { "source": "/products/product-1", "destination": "/produto/headless-rider", "permanent": true },
+    { "source": "/product-1.html", "destination": "/produto/headless-rider", "permanent": true },
+    { "source": "/produto/produto-1", "destination": "/produto/headless-rider", "permanent": true },
+    { "source": "/products/product-2.html", "destination": "/produto/fantasia-freira", "permanent": true },
+    { "source": "/products/product-2", "destination": "/produto/fantasia-freira", "permanent": true },
+    { "source": "/product-2.html", "destination": "/produto/fantasia-freira", "permanent": true },
+    { "source": "/produto/produto-2", "destination": "/produto/fantasia-freira", "permanent": true },
+    { "source": "/produto/holy-habit", "destination": "/produto/fantasia-freira", "permanent": true },
+    { "source": "/products/product-3.html", "destination": "/produto/creepy-crawler", "permanent": true },
+    { "source": "/products/product-3", "destination": "/produto/creepy-crawler", "permanent": true },
+    { "source": "/product-3.html", "destination": "/produto/creepy-crawler", "permanent": true },
+    { "source": "/produto/produto-3", "destination": "/produto/creepy-crawler", "permanent": true }
+  ],
+  "rewrites": [
+    { "source": "/produto/:slug", "destination": "/produto/:slug/index.html" },
+    { "source": "/sobre", "destination": "/pages/about.html" },
+    { "source": "/faq", "destination": "/pages/faq.html" },
+    { "source": "/contato", "destination": "/pages/contact.html" },
+    { "source": "/politicas", "destination": "/pages/policies.html" },
+    { "source": "/envio", "destination": "/pages/shipping.html" },
+    { "source": "/devolucoes", "destination": "/pages/returns.html" },
+    { "source": "/privacidade", "destination": "/pages/privacy.html" },
+    { "source": "/termos", "destination": "/pages/terms.html" },
+    { "source": "/informacoes-entrega", "destination": "/pages/informacoes-entrega.html" },
+    { "source": "/obrigado", "destination": "/pages/thank-you.html" }
+  ],
+  "headers": [
+    {
+      "source": "/assets/(.*)",
+      "headers": [
+        { "key": "Cache-Control", "value": "public, max-age=31536000, immutable" }
+      ]
+    },
+    {
+      "source": "/(.*)",
+      "headers": [
+        { "key": "X-Content-Type-Options", "value": "nosniff" },
+        { "key": "X-Frame-Options", "value": "SAMEORIGIN" },
+        { "key": "Referrer-Policy", "value": "strict-origin-when-cross-origin" }
+      ]
+    }
+  ]
+}

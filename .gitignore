@@ -1,0 +1,15 @@
+# Variáveis de ambiente e segredos (NUNCA commitar no Git)
+.env
+.env.local
+.env.*.local
+
+# Dependências e cache
+node_modules/
+.vercel/
+__pycache__/
+*.py[cod]
+
+# Dados locais de execução, pacotes zip e capturas de auditoria
+data/orders_tracking.json
+audit_screenshots/
+*.zip

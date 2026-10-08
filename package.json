@@ -1,0 +1,14 @@
+{
+  "name": "hollowpaw-store",
+  "version": "2.0.0",
+  "private": true,
+  "description": "Loja autônoma Hollowpaw otimizada para deploy na Vercel (Static + Serverless API Routes)",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "scripts": {
+    "build": "node scripts/build.js",
+    "dev": "node scripts/build.js && node scripts/dev-server.js",
+    "start": "node scripts/dev-server.js"
+  }
+}
