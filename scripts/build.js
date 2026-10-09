@@ -32,6 +32,10 @@ let vaPkg = { name: "@vercel/analytics", version: "2.0.1" };
 try {
   vaPkg = require("@vercel/analytics/package.json");
 } catch (_) {}
+let siPkg = { name: "@vercel/speed-insights", version: "2.0.0" };
+try {
+  siPkg = require("@vercel/speed-insights/package.json");
+} catch (_) {}
 
 const SITE = (process.env.SITE_URL || STORE.siteUrl || "https://www.hollowpaw.com.br").replace(/\/+$/, "");
 const BRAND = STORE.brandName || "Hollowpaw";
@@ -304,6 +308,13 @@ function vercelAnalytics() {
   );
 }
 
+function vercelSpeedInsights() {
+  return (
+    `<script>window.si = window.si || function () { (window.siq = window.siq || []).push(arguments); };</script>\n` +
+    `<script defer src="/_vercel/speed-insights/script.js" data-sdkn="${e(siPkg.name)}" data-sdkv="${e(siPkg.version)}"></script>`
+  );
+}
+
 function page({
   canonicalPath,
   title,
@@ -375,6 +386,7 @@ ${body}
 ${footer()}
 ${scripts(extraScripts)}
 ${vercelAnalytics()}
+${vercelSpeedInsights()}
 </body>
 </html>
 `;

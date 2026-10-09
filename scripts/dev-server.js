@@ -75,9 +75,17 @@ const server = http.createServer(async (req, res) => {
       return await handler(req, res);
     }
 
-    // 1b. Emulação local de /_vercel/insights/script.js (na Vercel é servido pela Edge Network)
+    // 1b. Emulação local de /_vercel/insights/script.js e /_vercel/speed-insights/script.js (na Vercel são servidos pela Edge Network)
     if (pathname === "/_vercel/insights/script.js") {
       const stub = "window.va=window.va||function(){(window.vaq=window.vaq||[]).push(arguments)};\n";
+      res.statusCode = 200;
+      res.setHeader("Content-Type", "application/javascript; charset=utf-8");
+      res.setHeader("Content-Length", Buffer.byteLength(stub));
+      res.setHeader("Connection", "close");
+      return res.end(stub);
+    }
+    if (pathname === "/_vercel/speed-insights/script.js") {
+      const stub = "window.si=window.si||function(){(window.siq=window.siq||[]).push(arguments)};\n";
       res.statusCode = 200;
       res.setHeader("Content-Type", "application/javascript; charset=utf-8");
       res.setHeader("Content-Length", Buffer.byteLength(stub));
