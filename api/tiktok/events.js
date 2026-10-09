@@ -24,6 +24,9 @@ const {
 
 module.exports = async function handler(req, res) {
   const cfg = getConfig();
+  const hasServerToken = Boolean(
+    process.env.TIKTOK_ACCESS_TOKEN && process.env.TIKTOK_ACCESS_TOKEN.trim()
+  );
 
   if (req.method === "GET") {
     return sendJson(res, 200, {
@@ -31,7 +34,7 @@ module.exports = async function handler(req, res) {
       service: "tiktok_events_api",
       api_version: "v1.3",
       pixel_id: cfg.tiktokPixelId,
-      token_configured: Boolean(cfg.tiktokAccessToken),
+      token_configured: hasServerToken,
       test_event_code_configured: Boolean(cfg.tiktokTestEventCode)
     });
   }

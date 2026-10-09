@@ -335,6 +335,34 @@
     } catch (e) {}
   }
 
+  function sendToTikTokBackend(eventName, data, evId) {
+    if (eventName === "PageView" || eventName === "Pageview" || eventName === "Purchase") return;
+    var ttEndpoint = endpoints.TIKTOK_EVENTS || "/api/tiktok/events";
+    try {
+      var payload = JSON.stringify({
+        event: eventName,
+        event_id: evId,
+        event_time: Math.floor(Date.now() / 1000),
+        url: window.location.href,
+        properties: buildTikTokBrowserProps(eventName, data),
+        custom_data: data || {},
+        attribution: getAttribution(),
+        user_agent: navigator.userAgent
+      });
+      if (navigator.sendBeacon) {
+        var blob = new Blob([payload], { type: "application/json" });
+        navigator.sendBeacon(ttEndpoint, blob);
+      } else if (window.fetch) {
+        window.fetch(ttEndpoint, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: payload,
+          keepalive: true
+        }).catch(function () {});
+      }
+    } catch (e) {}
+  }
+
   function sendToBackendCapi(eventName, data, evId) {
     try {
       var payload = JSON.stringify({
@@ -344,7 +372,8 @@
         event_source_url: window.location.href,
         custom_data: data || {},
         attribution: getAttribution(),
-        user_agent: navigator.userAgent
+        user_agent: navigator.userAgent,
+        tiktok_handled: true
       });
       if (navigator.sendBeacon) {
         var blob = new Blob([payload], { type: "application/json" });
@@ -388,6 +417,7 @@
     });
 
     if (syncCapi !== false) {
+      sendToTikTokBackend(eventName, data, evId);
       sendToBackendCapi(eventName, data, evId);
     }
 

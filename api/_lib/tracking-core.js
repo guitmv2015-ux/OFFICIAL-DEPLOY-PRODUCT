@@ -37,18 +37,18 @@ function getConfig() {
   const env = process.env;
   return {
     tiktokPixelId: (env.TIKTOK_PIXEL_ID || "DB477NJC77U2NTDCJ9JG").trim(),
-    tiktokAccessToken: (env["TIKTOK_ACCESS_" + "TOKEN"] || "").trim(),
+    tiktokAccessToken: (env.TIKTOK_ACCESS_TOKEN || "").trim(),
     tiktokTestEventCode: (env.TIKTOK_TEST_EVENT_CODE || "").trim(),
     tiktokApiUrl: (
       env.TIKTOK_EVENTS_API_URL || "https://business-api.tiktok.com/open_api/v1.3/event/track/"
     ).trim(),
     metaPixelId: (env.META_PIXEL_ID || "1576880640332577").trim(),
-    metaAccessToken: (env["META_CAPI_ACCESS_" + "TOKEN"] || "").trim(),
+    metaAccessToken: (env.META_CAPI_ACCESS_TOKEN || "").trim(),
     metaTestEventCode: (env.META_TEST_EVENT_CODE || "").trim(),
     metaGraphVersion: (env.META_GRAPH_API_VERSION || "v20.0").trim(),
-    utmifyToken: (env["UTMIFY_API_" + "TOKEN"] || "").trim(),
+    utmifyToken: (env.UTMIFY_API_TOKEN || "").trim(),
     utmifyUrl: (env.UTMIFY_API_URL || "https://api.utmify.com.br/api-credentials/orders").trim(),
-    webhookVerifyKey: (env["BRAVO_WEBHOOK_" + "SECRET"] || env["WEBHOOK_" + "SECRET"] || "").trim()
+    webhookVerifyKey: (env.BRAVO_WEBHOOK_SECRET || env.WEBHOOK_SECRET || "").trim()
   };
 }
 

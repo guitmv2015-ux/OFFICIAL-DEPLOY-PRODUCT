@@ -75,9 +75,13 @@ module.exports = async function handler(req, res) {
   });
 
   // PageView no TikTok já é disparado 1x no navegador por `ttq.page()`;
-  // Todos os eventos de funil/conversão são enviados para a TikTok Events API com o mesmo `event_id`.
-  let tiktokRes = { sent: false, skipped: "pageview_handled_by_browser_pixel" };
-  if (evName !== "PageView") {
+  // Eventos de funil enviados pelo navegador chamam diretamente `/api/tiktok/events` (`tiktok_handled: true`).
+  // Se `/api/tracking/event` for chamado diretamente sem `tiktok_handled`, envia também para a TikTok Events API.
+  let tiktokRes = {
+    sent: false,
+    skipped: body.tiktok_handled ? "dispatched_via_api_tiktok_events" : "pageview_handled_by_browser_pixel"
+  };
+  if (evName !== "PageView" && !body.tiktok_handled) {
     mem.sentTikTokEventIds.add(evId);
     const tiktokPayload = buildTikTokEventsPayload({
       eventName: evName,
