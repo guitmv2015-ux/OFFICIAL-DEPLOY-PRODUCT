@@ -15,6 +15,7 @@
    ========================================================================== */
 window.TRACKING_CONFIG = {
   META_PIXEL_ID: "1576880640332577",
+  TIKTOK_PIXEL_ID: "DB477NJC77U2NTDCJ9JG",
   GA4_ID: "",
   GTM_ID: "",
 

@@ -227,6 +227,54 @@
   }
 
   /* --------------------------------------------------------------------------
+     2c. TikTok Pixel (DB477NJC77U2NTDCJ9JG) — sincronização sem duplicação
+     -------------------------------------------------------------------------- */
+  var tiktokPixelId = valid(cfg.TIKTOK_PIXEL_ID) ? cfg.TIKTOK_PIXEL_ID.trim() : "";
+  var tiktokInitialPageFiredByHead = false;
+  if (window.TiktokAnalyticsObject && window.ttq) {
+    window._hpTiktokPixelInitialized = true;
+    tiktokInitialPageFiredByHead = true;
+    log("TikTok Pixel detectado no <head>:", tiktokPixelId || "DB477NJC77U2NTDCJ9JG");
+  } else if (tiktokPixelId && !window._hpTiktokPixelInitialized) {
+    window._hpTiktokPixelInitialized = true;
+    !function (w, d, t) {
+      w.TiktokAnalyticsObject = t;
+      var ttq = w[t] = w[t] || [];
+      ttq.methods = ["page", "track", "identify", "instances", "debug", "on", "off", "once", "ready", "alias", "group", "enableCookie", "disableCookie", "holdConsent", "revokeConsent", "grantConsent"];
+      ttq.setAndDefer = function (t, e) {
+        t[e] = function () {
+          t.push([e].concat(Array.prototype.slice.call(arguments, 0)));
+        };
+      };
+      for (var i = 0; i < ttq.methods.length; i++) ttq.setAndDefer(ttq, ttq.methods[i]);
+      ttq.instance = function (t) {
+        for (var e = ttq._i[t] || [], n = 0; n < ttq.methods.length; n++) ttq.setAndDefer(e, ttq.methods[n]);
+        return e;
+      };
+      ttq.load = function (e, n) {
+        var r = "https://analytics.tiktok.com/i18n/pixel/events.js";
+        ttq._i = ttq._i || {};
+        ttq._i[e] = [];
+        ttq._i[e]._u = r;
+        ttq._t = ttq._t || {};
+        ttq._t[e] = +new Date();
+        ttq._o = ttq._o || {};
+        ttq._o[e] = n || {};
+        n = document.createElement("script");
+        n.type = "text/javascript";
+        n.async = !0;
+        n.src = r + "?sdkid=" + e + "&lib=" + t;
+        e = document.getElementsByTagName("script")[0];
+        e.parentNode.insertBefore(n, e);
+      };
+      ttq.load(tiktokPixelId);
+      ttq.page();
+      tiktokInitialPageFiredByHead = true;
+    }(window, document, "ttq");
+    log("TikTok Pixel inicializado via fallback:", tiktokPixelId);
+  }
+
+  /* --------------------------------------------------------------------------
      3. Helpers de Disparo (Browser Pixel + Backend CAPI não-bloqueante)
      -------------------------------------------------------------------------- */
   var sentEventIds = {};
@@ -338,6 +386,17 @@
       }
     },
 
+    /* Helper preparado para eventos futuros do TikTok Pixel (ttq.track) */
+    tiktokEvent: function (eventName, payload, options) {
+      if (!eventName || !window.ttq || typeof window.ttq.track !== "function") return false;
+      try {
+        window.ttq.track(String(eventName), payload || {}, options || {});
+        return true;
+      } catch (e) {
+        return false;
+      }
+    },
+
     /* 2. PAGEVIEW — 1x por rota/navegação */
     pageView: function (customPath) {
       var currentPath = customPath || (window.location.pathname + window.location.search);
@@ -345,7 +404,13 @@
         log("PageView duplicado ignorado para:", currentPath);
         return false;
       }
+      var isInitialLoad = lastPageViewPath === null;
       lastPageViewPath = currentPath;
+      if (!isInitialLoad && window.ttq && typeof window.ttq.page === "function") {
+        try {
+          window.ttq.page();
+        } catch (e) {}
+      }
       var id = eventId("pv");
       return fbTrack("PageView", {}, id, true);
     },
