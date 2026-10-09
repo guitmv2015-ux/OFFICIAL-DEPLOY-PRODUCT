@@ -13,21 +13,25 @@ module.exports = async function handler(req, res) {
   }
 
   const urlObj = new URL(req.url, "https://www.hollowpaw.com.br");
-  const orderId = String(
+  const rawOrderId = String(
     urlObj.searchParams.get("order_id") || urlObj.searchParams.get("pedido") || ""
   ).trim();
+  const rawTxId = String(urlObj.searchParams.get("transaction_id") || "").trim();
 
-  if (!orderId) {
+  if (!rawOrderId && !rawTxId) {
     return sendJson(res, 400, { ok: false, error: "missing_order_id", paid: false });
   }
 
   const db = loadDb();
-  const order = db.orders[orderId];
+  const resolvedOrderId =
+    rawOrderId || (rawTxId && db.transaction_to_order && db.transaction_to_order[rawTxId]) || rawTxId;
+  const order = db.orders[resolvedOrderId];
 
   if (!order) {
     return sendJson(res, 200, {
       ok: true,
-      order_id: orderId,
+      order_id: resolvedOrderId,
+      transaction_id: rawTxId || null,
       exists: false,
       paid: false,
       status: "unknown",
@@ -37,12 +41,16 @@ module.exports = async function handler(req, res) {
 
   return sendJson(res, 200, {
     ok: true,
-    order_id: orderId,
+    order_id: order.order_id || resolvedOrderId,
+    transaction_id: order.transaction_id || null,
     exists: true,
     paid: Boolean(order.paid),
     status: order.status || "pending",
-    event_id: order.event_id || `purchase_${orderId}`,
+    event_id: order.event_id || `purchase_${order.order_id || resolvedOrderId}`,
+    capi_purchase_sent: Boolean(order.capi_purchase_sent),
+    tiktok_purchase_sent: Boolean(order.tiktok_purchase_sent),
     browser_purchase_fired: Boolean(order.browser_purchase_fired),
+    amount_cents: Number(order.amount_cents || Math.round(Number(order.value || 29.9) * 100)),
     value: Number(order.value || 29.9),
     currency: order.currency || "BRL",
     product_id: order.product_id || "product1"

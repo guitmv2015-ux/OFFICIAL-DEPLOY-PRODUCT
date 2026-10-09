@@ -44,12 +44,25 @@ function getConfig() {
       env.TIKTOK_EVENTS_API_URL || "https://business-api.tiktok.com/open_api/v1.3/event/track/"
     ).trim(),
     metaPixelId: (env.META_PIXEL_ID || "1576880640332577").trim(),
-    metaAccessToken: (env.META_CAPI_ACCESS_TOKEN || "").trim(),
+    metaAccessToken: (env.META_ACCESS_TOKEN || env.META_CAPI_ACCESS_TOKEN || "").trim(),
     metaTestEventCode: (env.META_TEST_EVENT_CODE || "").trim(),
     metaGraphVersion: (env.META_GRAPH_API_VERSION || "v20.0").trim(),
     utmifyToken: (env.UTMIFY_API_TOKEN || "").trim(),
     utmifyUrl: (env.UTMIFY_API_URL || "https://api.utmify.com.br/api-credentials/orders").trim(),
-    webhookVerifyKey: (env.BRAVO_WEBHOOK_SECRET || env.WEBHOOK_SECRET || "").trim()
+    bravoApiUrl: (env.BRAVOPAY_API_URL || "https://bravopay.club/api/v1").trim().replace(/\/+$/, ""),
+    bravoApiToken: (
+      env.BRAVOPAY_API_TOKEN ||
+      env.BRAVOPAY_API_KEY ||
+      env.BRAVO_API_KEY ||
+      ""
+    ).trim(),
+    bravoProductId: (env.BRAVOPAY_PRODUCT_ID || "").trim(),
+    webhookVerifyKey: (
+      env.BRAVOPAY_WEBHOOK_SECRET ||
+      env.BRAVO_WEBHOOK_SECRET ||
+      env.WEBHOOK_SECRET ||
+      ""
+    ).trim()
   };
 }
 
@@ -61,33 +74,81 @@ const APPROVED_STATUSES = new Set([
   "pagamento_aprovado",
   "order.paid",
   "payment.approved",
-  "charge.succeeded"
+  "charge.succeeded",
+  "transaction.paid"
 ]);
 
-const NON_PURCHASE_STATUSES = new Set([
+const PENDING_STATUSES = new Set([
   "pending",
   "waiting_payment",
   "pix_generated",
   "boleto_generated",
-  "created",
   "processing",
   "authorized",
+  "transaction.created",
+  "transaction.receipt_uploaded"
+]);
+
+const REFUSED_STATUSES = new Set([
   "failed",
   "refused",
   "declined",
+  "rejected",
+  "transaction.failed"
+]);
+
+const CANCELED_STATUSES = new Set([
   "canceled",
   "cancelled",
+  "expired",
+  "transaction.expired"
+]);
+
+const REFUNDED_STATUSES = new Set([
   "refunded",
   "chargeback",
-  "expired"
+  "chargedback",
+  "transaction.refunded",
+  "transaction.chargeback"
+]);
+
+const NON_PURCHASE_STATUSES = new Set([
+  "created",
+  ...PENDING_STATUSES,
+  ...REFUSED_STATUSES,
+  ...CANCELED_STATUSES,
+  ...REFUNDED_STATUSES
 ]);
 
 const REVERSAL_STATUSES = new Set([
-  "refunded",
-  "chargeback",
-  "canceled",
-  "cancelled"
+  ...CANCELED_STATUSES,
+  ...REFUNDED_STATUSES
 ]);
+
+function normalizeOrderState(rawStatus, rawEventType) {
+  const st = String(rawStatus || "").trim().toLowerCase();
+  const ev = String(rawEventType || "").trim().toLowerCase();
+
+  // Se o status explícito da transação indicar estado não pago, ele tem precedência sobre o tipo do envelope
+  if (st) {
+    if (REFUNDED_STATUSES.has(st)) return { canonicalStatus: "refunded", isApproved: false };
+    if (CANCELED_STATUSES.has(st)) return { canonicalStatus: "canceled", isApproved: false };
+    if (REFUSED_STATUSES.has(st)) return { canonicalStatus: "refused", isApproved: false };
+    if (PENDING_STATUSES.has(st)) return { canonicalStatus: "pending", isApproved: false };
+    if (st === "created") return { canonicalStatus: "created", isApproved: false };
+    if (APPROVED_STATUSES.has(st)) return { canonicalStatus: "paid", isApproved: true };
+  }
+
+  if (ev) {
+    if (REFUNDED_STATUSES.has(ev)) return { canonicalStatus: "refunded", isApproved: false };
+    if (CANCELED_STATUSES.has(ev)) return { canonicalStatus: "canceled", isApproved: false };
+    if (REFUSED_STATUSES.has(ev)) return { canonicalStatus: "refused", isApproved: false };
+    if (PENDING_STATUSES.has(ev)) return { canonicalStatus: "pending", isApproved: false };
+    if (APPROVED_STATUSES.has(ev)) return { canonicalStatus: "paid", isApproved: true };
+  }
+
+  return { canonicalStatus: "pending", isApproved: false };
+}
 
 const ALLOWED_BROWSER_EVENTS = new Set([
   "PageView",
@@ -218,7 +279,15 @@ if (!globalThis.__HP_TRACKING_MEM__) {
   globalThis.__HP_TRACKING_MEM__ = {
     sentEventIds: new Set(),
     sentTikTokEventIds: new Set(),
-    db: { orders: {}, last_session: null, capi_log: [], tiktok_log: [], utmify_log: [] }
+    db: {
+      orders: {},
+      transaction_to_order: {},
+      last_session: null,
+      capi_log: [],
+      tiktok_log: [],
+      utmify_log: [],
+      bravopay_log: []
+    }
   };
 }
 
@@ -228,14 +297,23 @@ function loadDb() {
     if (fs.existsSync(file)) {
       const parsed = JSON.parse(fs.readFileSync(file, "utf8"));
       parsed.orders = parsed.orders || {};
+      parsed.transaction_to_order = parsed.transaction_to_order || {};
       parsed.capi_log = parsed.capi_log || [];
       parsed.tiktok_log = parsed.tiktok_log || [];
       parsed.utmify_log = parsed.utmify_log || [];
+      parsed.bravopay_log = parsed.bravopay_log || [];
       globalThis.__HP_TRACKING_MEM__.db = parsed;
       return parsed;
     }
   } catch (_) {}
-  return globalThis.__HP_TRACKING_MEM__.db;
+  const memDb = globalThis.__HP_TRACKING_MEM__.db;
+  memDb.orders = memDb.orders || {};
+  memDb.transaction_to_order = memDb.transaction_to_order || {};
+  memDb.capi_log = memDb.capi_log || [];
+  memDb.tiktok_log = memDb.tiktok_log || [];
+  memDb.utmify_log = memDb.utmify_log || [];
+  memDb.bravopay_log = memDb.bravopay_log || [];
+  return memDb;
 }
 
 function saveDb(db) {
@@ -692,6 +770,216 @@ async function dispatchUtmify(orderRecord, rawCustomer) {
   }
 }
 
+function buildBravoPayTransactionPayload({
+  orderId,
+  productId,
+  method = "pix",
+  customer = {},
+  attribution = {},
+  description = "",
+  expiresIn = 3600
+}) {
+  const cfg = getConfig();
+  const canonical =
+    resolveCanonicalProduct(productId) || resolveCanonicalProduct("product1");
+  const amountCents = Math.round(Number(canonical.price) * 100);
+  const cust = customer && typeof customer === "object" ? customer : {};
+  const attr = attribution && typeof attribution === "object" ? attribution : {};
+  const cleanOrderId = String(orderId || `ord_${Math.floor(Date.now() / 1000)}`)
+    .trim()
+    .slice(0, 120);
+
+  const customerObj = {};
+  if (cust.email && String(cust.email).trim()) {
+    customerObj.email = String(cust.email).trim();
+  }
+  if (cust.name && String(cust.name).trim()) {
+    customerObj.name = String(cust.name).trim();
+  }
+  const rawCpf = String(cust.cpf || cust.document || "").replace(/\D+/g, "");
+  if (rawCpf) {
+    customerObj.cpf = rawCpf;
+  }
+  const rawPhone = String(cust.phone || "").replace(/\D+/g, "");
+  if (rawPhone) {
+    customerObj.phone = rawPhone;
+  }
+
+  const utmObj = {
+    source: String(attr.utm_source || attr.source || "").trim(),
+    medium: String(attr.utm_medium || attr.medium || "").trim(),
+    campaign: String(attr.utm_campaign || attr.campaign || "").trim(),
+    content: String(attr.utm_content || attr.content || "").trim(),
+    term: String(attr.utm_term || attr.term || "").trim(),
+    fbclid: String(attr.fbclid || "").trim(),
+    ttclid: String(attr.ttclid || "").trim(),
+    gclid: String(attr.gclid || "").trim()
+  };
+
+  const payload = {
+    amount_cents: amountCents,
+    method: String(method || "pix").toLowerCase() === "card" ? "card" : "pix",
+    customer: customerObj,
+    description: String(description || `${canonical.name} - Pedido ${cleanOrderId}`)
+      .trim()
+      .slice(0, 300),
+    external_reference: cleanOrderId,
+    metadata: {
+      order_id: cleanOrderId,
+      product_id: canonical.id,
+      product_sku: canonical.sku
+    },
+    expires_in: Math.min(86400, Math.max(60, Number(expiresIn) || 3600)),
+    utm: utmObj
+  };
+
+  if (cfg.bravoProductId) {
+    payload.product_id = cfg.bravoProductId;
+  }
+
+  return payload;
+}
+
+async function createBravoPayTransaction(txArgs = {}) {
+  const cfg = getConfig();
+  const payload = buildBravoPayTransactionPayload(txArgs);
+  if (!cfg.bravoApiToken) {
+    return {
+      created: false,
+      configured: false,
+      reason: "BRAVOPAY_API_TOKEN_NOT_CONFIGURED",
+      amount_cents: payload.amount_cents,
+      external_reference: payload.external_reference
+    };
+  }
+
+  const url = `${cfg.bravoApiUrl}/transactions`;
+  const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
+  const timer = controller ? setTimeout(() => controller.abort(), 8000) : null;
+
+  try {
+    const resp = await fetch(url, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${cfg.bravoApiToken}`,
+        "Content-Type": "application/json",
+        "Idempotency-Key": payload.external_reference
+      },
+      body: JSON.stringify(payload),
+      signal: controller ? controller.signal : undefined
+    });
+
+    const rawText = await resp.text();
+    let parsed = null;
+    try {
+      parsed = JSON.parse(rawText);
+    } catch (_) {}
+
+    const txId = parsed && parsed.id ? String(parsed.id).trim() : null;
+    const isOk = resp.ok && Boolean(txId);
+
+    return {
+      created: isOk,
+      configured: true,
+      http_status: resp.status,
+      transaction_id: txId,
+      status: (parsed && parsed.status) || null,
+      method: (parsed && parsed.method) || payload.method.toUpperCase(),
+      amount_cents:
+        parsed && typeof parsed.amount_cents === "number"
+          ? parsed.amount_cents
+          : payload.amount_cents,
+      currency: (parsed && parsed.currency) || "BRL",
+      external_reference:
+        (parsed && parsed.external_reference) || payload.external_reference,
+      pix: (parsed && parsed.pix) || null,
+      card: (parsed && parsed.card) || null,
+      created_at: (parsed && parsed.created_at) || null,
+      error: !isOk
+        ? (parsed && parsed.error) || {
+            code: "bravopay_http_error",
+            message: rawText.slice(0, 200)
+          }
+        : null
+    };
+  } catch (err) {
+    const isAbort = err && err.name === "AbortError";
+    return {
+      created: false,
+      configured: true,
+      error: {
+        code: isAbort ? "bravopay_timeout" : "bravopay_network_error",
+        message: isAbort
+          ? "Timeout ao comunicar com a API da BravoPay"
+          : String(err.message || err).slice(0, 200)
+      }
+    };
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+async function fetchBravoPayTransaction(transactionId) {
+  const cfg = getConfig();
+  const cleanId = String(transactionId || "").trim();
+  if (!cleanId) {
+    return { ok: false, configured: Boolean(cfg.bravoApiToken), error: "missing_transaction_id" };
+  }
+  if (!cfg.bravoApiToken) {
+    return {
+      ok: false,
+      configured: false,
+      reason: "BRAVOPAY_API_TOKEN_NOT_CONFIGURED"
+    };
+  }
+
+  const url = `${cfg.bravoApiUrl}/transactions/${encodeURIComponent(cleanId)}`;
+  const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
+  const timer = controller ? setTimeout(() => controller.abort(), 8000) : null;
+
+  try {
+    const resp = await fetch(url, {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${cfg.bravoApiToken}`,
+        Accept: "application/json"
+      },
+      signal: controller ? controller.signal : undefined
+    });
+
+    const rawText = await resp.text();
+    let parsed = null;
+    try {
+      parsed = JSON.parse(rawText);
+    } catch (_) {}
+
+    return {
+      ok: resp.ok && Boolean(parsed && parsed.id),
+      configured: true,
+      http_status: resp.status,
+      transaction: parsed && parsed.id ? parsed : null,
+      error: !resp.ok
+        ? (parsed && parsed.error) || {
+            code: "bravopay_http_error",
+            message: rawText.slice(0, 200)
+          }
+        : null
+    };
+  } catch (err) {
+    const isAbort = err && err.name === "AbortError";
+    return {
+      ok: false,
+      configured: true,
+      error: {
+        code: isAbort ? "bravopay_timeout" : "bravopay_network_error",
+        message: String(err.message || err).slice(0, 200)
+      }
+    };
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 function getClientIp(req) {
   const xff = req.headers["x-forwarded-for"];
   if (typeof xff === "string" && xff.trim()) {
@@ -701,8 +989,18 @@ function getClientIp(req) {
 }
 
 async function readJsonBody(req) {
-  if (req.body && typeof req.body === "object") return req.body;
+  if (req.body && typeof req.body === "object") {
+    if (typeof req.rawBody !== "string") {
+      try {
+        req.rawBody = JSON.stringify(req.body);
+      } catch (_) {
+        req.rawBody = "";
+      }
+    }
+    return req.body;
+  }
   if (typeof req.body === "string" && req.body.trim()) {
+    req.rawBody = req.body;
     try {
       return JSON.parse(req.body);
     } catch (_) {
@@ -715,6 +1013,7 @@ async function readJsonBody(req) {
       raw += chunk;
     });
     req.on("end", () => {
+      req.rawBody = raw;
       if (!raw.trim()) return resolve({});
       try {
         resolve(JSON.parse(raw));
@@ -722,7 +1021,10 @@ async function readJsonBody(req) {
         resolve({});
       }
     });
-    req.on("error", () => resolve({}));
+    req.on("error", () => {
+      req.rawBody = "";
+      resolve({});
+    });
   });
 }
 
@@ -735,10 +1037,12 @@ function sendJson(res, statusCode, data) {
   res.end(body);
 }
 
-function verifyWebhookAuth(req, rawPayloadObj, secretKey) {
+function verifyWebhookAuth(req, rawPayloadObj, secretKey, rawBodyStr) {
   if (!secretKey) return true;
   const sigHeader = String(
-    req.headers["x-bravo-signature"] ||
+    req.headers["bravopay-signature"] ||
+      req.headers["x-bravopay-signature"] ||
+      req.headers["x-bravo-signature"] ||
       req.headers["x-webhook-secret"] ||
       req.headers["x-webhook-token"] ||
       req.headers["authorization"] ||
@@ -746,6 +1050,41 @@ function verifyWebhookAuth(req, rawPayloadObj, secretKey) {
   ).trim();
   if (!sigHeader) return false;
 
+  const bodyStr =
+    typeof rawBodyStr === "string" && rawBodyStr.length > 0
+      ? rawBodyStr
+      : JSON.stringify(rawPayloadObj || {});
+
+  // 1. Formato oficial BravoPay: BravoPay-Signature: t=<ts>,v1=<hmac_sha256_hex>
+  if (sigHeader.includes("t=") && sigHeader.includes("v1=")) {
+    try {
+      const parts = {};
+      for (const piece of sigHeader.split(",")) {
+        const idx = piece.indexOf("=");
+        if (idx > 0) {
+          parts[piece.slice(0, idx).trim()] = piece.slice(idx + 1).trim();
+        }
+      }
+      const t = Number(parts.t);
+      const v1 = String(parts.v1 || "").toLowerCase();
+      if (!t || !v1 || Math.abs(Date.now() / 1000 - t) > 300) {
+        return false;
+      }
+      const expected = crypto
+        .createHmac("sha256", secretKey)
+        .update(`${t}.${bodyStr}`, "utf8")
+        .digest("hex")
+        .toLowerCase();
+      const a = Buffer.from(v1, "utf8");
+      const b = Buffer.from(expected, "utf8");
+      if (a.length === b.length && crypto.timingSafeEqual(a, b)) {
+        return true;
+      }
+    } catch (_) {}
+    return false;
+  }
+
+  // 2. Comparação direta constante (Bearer <secret> ou x-webhook-secret)
   const cleanHeader = sigHeader.replace(/^Bearer\s+/i, "").trim();
   try {
     const a = Buffer.from(cleanHeader, "utf8");
@@ -755,10 +1094,11 @@ function verifyWebhookAuth(req, rawPayloadObj, secretKey) {
     }
   } catch (_) {}
 
+  // 3. HMAC-SHA256 direto sobre o corpo JSON
   try {
     const hmac = crypto
       .createHmac("sha256", secretKey)
-      .update(JSON.stringify(rawPayloadObj || {}), "utf8")
+      .update(bodyStr, "utf8")
       .digest("hex");
     const a = Buffer.from(cleanHeader.toLowerCase(), "utf8");
     const b = Buffer.from(hmac.toLowerCase(), "utf8");
@@ -770,134 +1110,336 @@ function verifyWebhookAuth(req, rawPayloadObj, secretKey) {
   return false;
 }
 
+function normalizeIncomingAttribution(rawTracking, fallbackAttribution) {
+  const base = Object.assign({}, fallbackAttribution || {});
+  if (!rawTracking || typeof rawTracking !== "object") return base;
+
+  const mapPairs = [
+    ["utm_source", rawTracking.utm_source || rawTracking.source],
+    ["utm_medium", rawTracking.utm_medium || rawTracking.medium],
+    ["utm_campaign", rawTracking.utm_campaign || rawTracking.campaign],
+    ["utm_content", rawTracking.utm_content || rawTracking.content],
+    ["utm_term", rawTracking.utm_term || rawTracking.term],
+    ["fbclid", rawTracking.fbclid],
+    ["ttclid", rawTracking.ttclid],
+    ["gclid", rawTracking.gclid],
+    ["_fbp", rawTracking._fbp],
+    ["_fbc", rawTracking._fbc],
+    ["_ttp", rawTracking._ttp],
+    ["landing_page", rawTracking.landing_page],
+    ["referrer", rawTracking.referrer],
+    ["src", rawTracking.src || rawTracking.xcod],
+    ["sck", rawTracking.sck]
+  ];
+
+  for (const [k, val] of mapPairs) {
+    if (val && typeof val === "string" && val.trim() && !base[k]) {
+      base[k] = val.trim();
+    }
+  }
+  return base;
+}
+
 async function handlePaymentWebhook(req, res) {
   if (req.method !== "POST") {
     return sendJson(res, 405, { ok: false, error: "method_not_allowed" });
   }
   const body = await readJsonBody(req);
   const cfg = getConfig();
-  if (cfg.webhookVerifyKey && !verifyWebhookAuth(req, body, cfg.webhookVerifyKey)) {
-    return sendJson(res, 401, { ok: false, error: "invalid_webhook_signature" });
+  if (cfg.webhookVerifyKey && !verifyWebhookAuth(req, body, cfg.webhookVerifyKey, req.rawBody)) {
+    return sendJson(res, 401, {
+      ok: false,
+      error: "invalid_webhook_signature",
+      purchase_dispatched: false
+    });
+  }
+
+  const rawEventType = String(body.type || body.event || "").trim().toLowerCase();
+  if (rawEventType.startsWith("withdrawal.")) {
+    return sendJson(res, 200, {
+      ok: true,
+      ignored: "withdrawal_event",
+      purchase_dispatched: false
+    });
   }
 
   const clientIp = getClientIp(req);
   const ua = req.headers["user-agent"] || "";
   const nested = body.data && typeof body.data === "object" ? body.data : {};
+  const metaObj =
+    (nested.metadata && typeof nested.metadata === "object" ? nested.metadata : null) ||
+    (body.metadata && typeof body.metadata === "object" ? body.metadata : null) ||
+    {};
 
-  const orderId = String(
-    body.order_id ||
+  const rawBodyId = String(body.id || "").trim();
+  const rawNestedId = String(nested.id || "").trim();
+  const transactionId = String(
+    body.transaction_id ||
+      nested.transaction_id ||
+      (rawNestedId.startsWith("tx_") ? rawNestedId : "") ||
+      (rawBodyId.startsWith("tx_") ? rawBodyId : "") ||
+      (body.data && rawNestedId ? rawNestedId : "")
+  )
+    .trim()
+    .slice(0, 128);
+
+  const db = loadDb();
+  const lastSess = db.last_session || {};
+
+  const externalRef = String(
+    nested.external_reference ||
+      body.external_reference ||
+      metaObj.order_id ||
+      body.order_id ||
       body.orderId ||
-      body.id ||
-      body.transaction_id ||
-      body.reference ||
       nested.order_id ||
       nested.orderId ||
-      nested.id ||
-      nested.transaction_id ||
+      body.reference ||
       nested.reference ||
       ""
   )
     .trim()
     .slice(0, 128);
 
+  const mappedOrderFromTx =
+    transactionId && db.transaction_to_order && db.transaction_to_order[transactionId]
+      ? String(db.transaction_to_order[transactionId])
+      : "";
+
+  let orderId =
+    externalRef ||
+    mappedOrderFromTx ||
+    transactionId ||
+    (!rawBodyId.startsWith("evt_") ? rawBodyId : "");
+  orderId = String(orderId || "").trim().slice(0, 128);
+
   const rawStatus = String(
-    body.status ||
+    nested.status ||
+      body.status ||
       body.payment_status ||
-      body.state ||
-      nested.status ||
       nested.payment_status ||
+      body.state ||
       nested.state ||
-      body.event ||
       ""
   )
     .trim()
     .toLowerCase();
 
-  if (!orderId || !rawStatus) {
-    return sendJson(res, 400, { ok: false, error: "missing_order_id_or_status" });
+  if (!orderId || (!rawStatus && !rawEventType)) {
+    return sendJson(res, 400, {
+      ok: false,
+      error: "missing_order_id_or_status",
+      purchase_dispatched: false
+    });
   }
 
-  const isApproved = APPROVED_STATUSES.has(rawStatus);
-  const db = loadDb();
-  const lastSess = db.last_session || {};
-  let existing = db.orders[orderId];
+  const { canonicalStatus, isApproved } = normalizeOrderState(rawStatus, rawEventType);
+
+  let existing =
+    db.orders[orderId] ||
+    (mappedOrderFromTx && db.orders[mappedOrderFromTx] ? db.orders[mappedOrderFromTx] : null);
+
+  if (existing && existing.order_id) {
+    orderId = existing.order_id;
+  }
+
+  // Valida correspondência entre pedido interno e transação da BravoPay
+  if (
+    existing &&
+    existing.transaction_id &&
+    transactionId &&
+    existing.transaction_id !== transactionId
+  ) {
+    return sendJson(res, 409, {
+      ok: false,
+      error: "transaction_order_mismatch",
+      order_id: orderId,
+      expected_transaction_id: existing.transaction_id,
+      received_transaction_id: transactionId,
+      purchase_dispatched: false
+    });
+  }
+
+  const rawPid =
+    (existing && existing.product_id) ||
+    metaObj.product_id ||
+    metaObj.product_sku ||
+    body.product_id ||
+    body.product_sku ||
+    nested.product_id ||
+    nested.product_sku ||
+    lastSess.product_id ||
+    "product1";
+  const canonical = resolveCanonicalProduct(rawPid) || resolveCanonicalProduct("product1");
+
+  // Valida moeda (currency = BRL)
+  const incomingCurrency = nested.currency !== undefined ? nested.currency : body.currency;
+  if (
+    incomingCurrency !== undefined &&
+    incomingCurrency !== null &&
+    String(incomingCurrency).trim() !== "" &&
+    String(incomingCurrency).trim().toUpperCase() !== "BRL"
+  ) {
+    return sendJson(res, 400, {
+      ok: false,
+      error: "currency_mismatch",
+      order_id: orderId,
+      expected_currency: "BRL",
+      received_currency: String(incomingCurrency).trim(),
+      purchase_dispatched: false
+    });
+  }
+
+  // Valida valor (amount_cents = 2990 ou value = 29.90)
+  const expectedAmountCents =
+    existing && existing.amount_cents
+      ? Number(existing.amount_cents)
+      : Math.round(Number((existing && existing.value) || canonical.price) * 100);
+
+  const rawAmountCents =
+    nested.amount_cents !== undefined ? nested.amount_cents : body.amount_cents;
+  const rawVal =
+    nested.value !== undefined
+      ? nested.value
+      : body.value !== undefined
+      ? body.value
+      : nested.amount !== undefined
+      ? nested.amount
+      : body.amount;
+
+  let receivedAmountCents = null;
+  if (rawAmountCents !== undefined && rawAmountCents !== null && rawAmountCents !== "") {
+    receivedAmountCents = Math.round(Number(rawAmountCents));
+  } else if (rawVal !== undefined && rawVal !== null && rawVal !== "") {
+    receivedAmountCents = Math.round(Number(rawVal) * 100);
+  }
+
+  if (receivedAmountCents !== null) {
+    if (
+      Number.isNaN(receivedAmountCents) ||
+      receivedAmountCents <= 0 ||
+      Math.abs(receivedAmountCents - expectedAmountCents) > 1
+    ) {
+      return sendJson(res, 400, {
+        ok: false,
+        error: "amount_mismatch",
+        order_id: orderId,
+        expected_amount_cents: expectedAmountCents,
+        received_amount_cents: receivedAmountCents,
+        purchase_dispatched: false
+      });
+    }
+  }
+
+  const safeVal = Number((expectedAmountCents / 100).toFixed(2));
   const incomingRawCustomer = body.customer || nested.customer || null;
+  const incomingTracking =
+    nested.tracking ||
+    body.tracking ||
+    nested.utm ||
+    body.utm ||
+    body.attribution ||
+    nested.attribution ||
+    null;
 
   if (!existing) {
-    const rawPid =
-      body.product_id ||
-      body.product_sku ||
-      nested.product_id ||
-      nested.product_sku ||
-      lastSess.product_id ||
-      "product1";
-    const canonical = resolveCanonicalProduct(rawPid) || resolveCanonicalProduct("product1");
-    const rawVal = Number(
-      body.value || body.amount || nested.value || nested.amount || lastSess.value || canonical.price
-    );
-    const safeVal = !Number.isNaN(rawVal) && rawVal > 0 && rawVal <= 5000 ? rawVal : canonical.price;
-
     existing = {
       order_id: orderId,
+      transaction_id: transactionId || null,
       product_id: canonical.id,
       product_sku: canonical.sku,
       product_name: canonical.name,
       product_category: canonical.category,
+      amount_cents: expectedAmountCents,
       value: safeVal,
       currency: "BRL",
-      payment_method: body.payment_method || nested.payment_method || "pix",
+      payment_method: String(
+        nested.method || body.method || body.payment_method || nested.payment_method || "pix"
+      ).toLowerCase(),
       customer: incomingRawCustomer
         ? hashCustomerForStorage(incomingRawCustomer)
         : lastSess.customer || {},
-      attribution: body.attribution || nested.attribution || lastSess.attribution || {},
+      attribution: normalizeIncomingAttribution(incomingTracking, lastSess.attribution || {}),
       client_ip: lastSess.client_ip || clientIp,
       user_agent: lastSess.user_agent || ua,
       created_at: new Date().toISOString().replace("T", " ").slice(0, 19),
       paid: false,
-      status: "waiting_payment",
+      status: "pending",
       capi_purchase_sent: false,
       tiktok_purchase_sent: false,
+      purchase_webhook_processed: false,
       browser_purchase_fired: false,
       event_id: `purchase_${orderId}`
     };
     db.orders[orderId] = existing;
-  } else if (incomingRawCustomer) {
-    existing.customer = Object.assign(
-      {},
-      existing.customer || {},
-      hashCustomerForStorage(incomingRawCustomer)
-    );
+  } else {
+    if (transactionId && !existing.transaction_id) {
+      existing.transaction_id = transactionId;
+    }
+    if (!existing.amount_cents) {
+      existing.amount_cents = expectedAmountCents;
+    }
+    if (incomingRawCustomer) {
+      existing.customer = Object.assign(
+        {},
+        existing.customer || {},
+        hashCustomerForStorage(incomingRawCustomer)
+      );
+    }
+    if (incomingTracking) {
+      existing.attribution = normalizeIncomingAttribution(
+        incomingTracking,
+        existing.attribution || {}
+      );
+    }
   }
 
-  // Idempotência: se ambos os envios de Purchase já foram concluídos para este pedido, bloqueia duplicidade
-  if (existing.capi_purchase_sent && existing.tiktok_purchase_sent && isApproved) {
+  if (existing.transaction_id) {
+    db.transaction_to_order[existing.transaction_id] = orderId;
+  }
+
+  // Idempotência: se todos os destinos ativos já tiveram Purchase confirmado (ou processado sem pendências de retry), bloqueia duplicidade
+  const metaDoneOrUnconfigured = Boolean(existing.capi_purchase_sent) || !cfg.metaAccessToken;
+  const tiktokDoneOrUnconfigured = Boolean(existing.tiktok_purchase_sent) || !cfg.tiktokAccessToken;
+
+  if (
+    existing.purchase_webhook_processed &&
+    metaDoneOrUnconfigured &&
+    tiktokDoneOrUnconfigured &&
+    isApproved
+  ) {
     saveDb(db);
     return sendJson(res, 200, {
       ok: true,
       order_id: orderId,
+      transaction_id: existing.transaction_id || null,
       status: existing.status,
       paid: true,
       purchase_dispatched: false,
       duplicate_prevented: true,
+      capi_purchase_sent: Boolean(existing.capi_purchase_sent),
+      tiktok_purchase_sent: Boolean(existing.tiktok_purchase_sent),
       event_id: existing.event_id
     });
   }
 
-  // Se NÃO for status aprovado (ex.: pix_generated, waiting_payment, refused):
-  // Protege contra downgrade caso um webhook "waiting_payment" chegue fora de ordem após "paid"
+  // Se NÃO for status aprovado (ex.: created, pending, waiting_payment, refused, canceled, refunded):
+  // Protege contra downgrade caso um webhook "pending" chegue fora de ordem após "paid"
   if (!isApproved) {
-    if (existing.paid && !REVERSAL_STATUSES.has(rawStatus)) {
+    if (existing.paid && !REVERSAL_STATUSES.has(canonicalStatus) && !REVERSAL_STATUSES.has(rawStatus)) {
       return sendJson(res, 200, {
         ok: true,
         order_id: orderId,
+        transaction_id: existing.transaction_id || null,
         status: existing.status,
         paid: true,
         purchase_dispatched: false,
-        ignored_out_of_order_status: rawStatus
+        ignored_out_of_order_status: canonicalStatus
       });
     }
-    existing.status = NON_PURCHASE_STATUSES.has(rawStatus) ? rawStatus : "waiting_payment";
+    existing.status = canonicalStatus;
     existing.paid = false;
+    existing.updated_at = new Date().toISOString().replace("T", " ").slice(0, 19);
     const utmRes = await dispatchUtmify(existing, incomingRawCustomer);
     db.utmify_log.push({
       order_id: orderId,
@@ -909,6 +1451,7 @@ async function handlePaymentWebhook(req, res) {
     return sendJson(res, 200, {
       ok: true,
       order_id: orderId,
+      transaction_id: existing.transaction_id || null,
       status: existing.status,
       paid: false,
       purchase_dispatched: false,
@@ -916,12 +1459,16 @@ async function handlePaymentWebhook(req, res) {
     });
   }
 
-  // Pagamento confirmado e aprovado -> Preserva timestamp e event_id originais do pedido para idempotência e retry seguro
+  // Pagamento confirmado e aprovado -> Preserva timestamp e event_id originais do pedido para idempotência e retry seguro por plataforma
   const eventTime = existing.purchase_event_time || Math.floor(Date.now() / 1000);
   existing.purchase_event_time = eventTime;
   existing.paid = true;
   existing.status = "paid";
-  existing.approved_at = existing.approved_at || new Date().toISOString().replace("T", " ").slice(0, 19);
+  existing.approved_at =
+    existing.approved_at ||
+    (nested.paid_at ? String(nested.paid_at).replace("T", " ").slice(0, 19) : null) ||
+    new Date().toISOString().replace("T", " ").slice(0, 19);
+  existing.updated_at = new Date().toISOString().replace("T", " ").slice(0, 19);
   const evId = existing.event_id || `purchase_${orderId}`;
   existing.event_id = evId;
   globalThis.__HP_TRACKING_MEM__.sentEventIds.add(evId);
@@ -954,7 +1501,10 @@ async function handlePaymentWebhook(req, res) {
   const eventSourceUrl =
     (existing.attribution || {}).landing_page || "https://hollowpaw-vercel-ready.vercel.app/obrigado";
 
-  const capiPromise = existing.capi_purchase_sent
+  const metaAlreadySent = Boolean(existing.capi_purchase_sent);
+  const tiktokAlreadySent = Boolean(existing.tiktok_purchase_sent);
+
+  const capiPromise = metaAlreadySent
     ? Promise.resolve({ sent: true, skipped: "already_sent" })
     : dispatchMetaCapi(
         buildMetaCapiPayload({
@@ -970,7 +1520,7 @@ async function handlePaymentWebhook(req, res) {
         })
       );
 
-  const tiktokPromise = existing.tiktok_purchase_sent
+  const tiktokPromise = tiktokAlreadySent
     ? Promise.resolve({ sent: true, skipped: "already_sent" })
     : dispatchTikTokEventsApi(
         buildTikTokEventsPayload({
@@ -993,28 +1543,35 @@ async function handlePaymentWebhook(req, res) {
     dispatchUtmify(existing, incomingRawCustomer)
   ]);
 
-  // Marca como enviado quando aceito ou quando a credencial daquele destino não está configurada
-  if (capiRes.sent || capiRes.configured === false) {
+  // Somente marca cada plataforma como enviada quando houver confirmação real (HTTP 2xx / code 0) da respectiva API
+  if (capiRes.sent === true) {
     existing.capi_purchase_sent = true;
   }
-  if (tiktokRes.sent || tiktokRes.configured === false) {
+  if (tiktokRes.sent === true) {
     existing.tiktok_purchase_sent = true;
   }
+  existing.purchase_webhook_processed = true;
 
-  db.capi_log.push({
-    event_name: "Purchase",
-    event_id: evId,
-    order_id: orderId,
-    timestamp: eventTime,
-    result: capiRes
-  });
-  db.tiktok_log.push({
-    event_name: "Purchase",
-    event_id: evId,
-    order_id: orderId,
-    timestamp: eventTime,
-    result: tiktokRes
-  });
+  if (!metaAlreadySent) {
+    db.capi_log.push({
+      event_name: "Purchase",
+      event_id: evId,
+      order_id: orderId,
+      transaction_id: existing.transaction_id || null,
+      timestamp: eventTime,
+      result: capiRes
+    });
+  }
+  if (!tiktokAlreadySent) {
+    db.tiktok_log.push({
+      event_name: "Purchase",
+      event_id: evId,
+      order_id: orderId,
+      transaction_id: existing.transaction_id || null,
+      timestamp: eventTime,
+      result: tiktokRes
+    });
+  }
   db.utmify_log.push({
     order_id: orderId,
     status: "paid",
@@ -1026,10 +1583,16 @@ async function handlePaymentWebhook(req, res) {
   return sendJson(res, 200, {
     ok: true,
     order_id: orderId,
+    transaction_id: existing.transaction_id || null,
+    amount_cents: existing.amount_cents,
+    value: existing.value,
+    currency: existing.currency,
     status: "paid",
     paid: true,
     purchase_dispatched: true,
     duplicate_prevented: false,
+    capi_purchase_sent: Boolean(existing.capi_purchase_sent),
+    tiktok_purchase_sent: Boolean(existing.tiktok_purchase_sent),
     event_id: evId,
     tiktok: tiktokRes,
     capi: capiRes,
@@ -1044,6 +1607,7 @@ module.exports = {
   PRODUCT_PRICES,
   PRODUCT_CATEGORY,
   getConfig,
+  normalizeOrderState,
   resolveCanonicalProduct,
   sanitizeCustomData,
   hashCustomerForStorage,
@@ -1053,6 +1617,10 @@ module.exports = {
   dispatchMetaCapi,
   buildTikTokEventsPayload,
   dispatchTikTokEventsApi,
+  buildBravoPayTransactionPayload,
+  createBravoPayTransaction,
+  fetchBravoPayTransaction,
+  verifyWebhookAuth,
   getClientIp,
   readJsonBody,
   sendJson,

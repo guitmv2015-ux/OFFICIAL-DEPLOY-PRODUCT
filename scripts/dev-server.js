@@ -39,6 +39,8 @@ const MIME_TYPES = {
 
 const API_ROUTES = {
   "/api/tracking/event": path.join(API_DIR, "tracking", "event.js"),
+  "/api/tiktok/events": path.join(API_DIR, "tiktok", "events.js"),
+  "/api/bravopay/transactions": path.join(API_DIR, "bravopay", "transactions.js"),
   "/api/orders/session": path.join(API_DIR, "orders", "session.js"),
   "/api/orders/status": path.join(API_DIR, "orders", "status.js"),
   "/api/orders/ack-browser-purchase": path.join(API_DIR, "orders", "ack-browser-purchase.js"),
