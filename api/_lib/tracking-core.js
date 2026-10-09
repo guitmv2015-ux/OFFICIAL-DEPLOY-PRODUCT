@@ -3,6 +3,7 @@
  * ========================================================================================
  * Compatível com Vercel Serverless Functions (Node.js 18/20/24+) e ambiente local.
  * Nenhuma credencial fica no código: todas as chaves vêm exclusivamente de `process.env`.
+ * Nenhum dado pessoal (PII) em texto aberto é gravado em disco ou retornado em respostas HTTP.
  */
 "use strict";
 
@@ -81,6 +82,13 @@ const NON_PURCHASE_STATUSES = new Set([
   "expired"
 ]);
 
+const REVERSAL_STATUSES = new Set([
+  "refunded",
+  "chargeback",
+  "canceled",
+  "cancelled"
+]);
+
 const ALLOWED_BROWSER_EVENTS = new Set([
   "PageView",
   "ViewContent",
@@ -109,6 +117,8 @@ const PRODUCT_PRICES = {
   product3: 29.9
 };
 
+const PRODUCT_CATEGORY = "Fantasia para Pets";
+
 const SKU_TO_PRODUCT_ID = {
   "HP-RIDER-01": "product1",
   "HP-HABIT-01": "product2",
@@ -129,6 +139,7 @@ function resolveCanonicalProduct(rawKey) {
     id: pid,
     sku: PRODUCT_SKUS[pid],
     name: PRODUCT_NAMES[pid],
+    category: PRODUCT_CATEGORY,
     price: PRODUCT_PRICES[pid],
     currency: "BRL"
   };
@@ -166,12 +177,14 @@ function sanitizeCustomData(eventName, rawCustomData, fallbackProductId) {
     content_id: canonical.sku,
     content_type: "product",
     content_name: canonical.name,
+    content_category: canonical.category,
     contents: [
       {
         id: canonical.sku,
         content_id: canonical.sku,
         content_type: "product",
         content_name: canonical.name,
+        content_category: canonical.category,
         quantity: qty,
         item_price: unitPrice,
         price: unitPrice
@@ -235,9 +248,17 @@ function saveDb(db) {
   } catch (_) {}
 }
 
+function isSha256Hex(val) {
+  return typeof val === "string" && /^[a-f0-9]{64}$/i.test(val.trim());
+}
+
 function sha256Norm(val, mode = "text") {
   if (!val || typeof val !== "string") return null;
-  let v = val.trim().toLowerCase();
+  const trimmed = val.trim();
+  if (!trimmed) return null;
+  if (isSha256Hex(trimmed)) return trimmed.toLowerCase();
+
+  let v = trimmed.toLowerCase();
   if (mode === "phone") {
     let digits = v.replace(/\D+/g, "");
     if (!digits) return null;
@@ -259,12 +280,59 @@ function sha256Norm(val, mode = "text") {
   return crypto.createHash("sha256").update(v, "utf8").digest("hex");
 }
 
+/**
+ * Converte dados de cliente em hashes SHA-256 irreversíveis antes de persistir na sessão,
+ * evitando armazenar PII em texto aberto em arquivos temporários.
+ */
+function hashCustomerForStorage(rawCustomer) {
+  const c = rawCustomer && typeof rawCustomer === "object" ? rawCustomer : {};
+  const hashed = {};
+  const emHash = c.email_hash || sha256Norm(c.email, "email");
+  const phMetaHash = c.phone_meta_hash || sha256Norm(c.phone, "phone");
+  const phTiktokHash = c.phone_tiktok_hash || sha256Norm(c.phone, "tiktok_phone");
+  const zpHash = c.zp_hash || sha256Norm(c.cep, "cep");
+  const ctHash = c.ct_hash || sha256Norm(c.city);
+  const stHash = c.st_hash || sha256Norm(c.state);
+
+  if (emHash) hashed.email_hash = emHash;
+  if (phMetaHash) hashed.phone_meta_hash = phMetaHash;
+  if (phTiktokHash) hashed.phone_tiktok_hash = phTiktokHash;
+  if (zpHash) hashed.zp_hash = zpHash;
+  if (ctHash) hashed.ct_hash = ctHash;
+  if (stHash) hashed.st_hash = stHash;
+
+  const fullName = String(c.name || "").trim();
+  if (fullName) {
+    const parts = fullName.split(/\s+/);
+    const fnHash = sha256Norm(parts[0]);
+    const lnHash = parts.length > 1 ? sha256Norm(parts.slice(1).join(" ")) : null;
+    if (fnHash) hashed.fn_hash = fnHash;
+    if (lnHash) hashed.ln_hash = lnHash;
+  } else {
+    if (c.fn_hash) hashed.fn_hash = c.fn_hash;
+    if (c.ln_hash) hashed.ln_hash = c.ln_hash;
+  }
+  return hashed;
+}
+
 function sanitizeEventUrl(rawUrl, fallbackUrl) {
   const candidate = String(rawUrl || fallbackUrl || "https://hollowpaw-vercel-ready.vercel.app/").trim();
   try {
     const u = new URL(candidate);
-    // Remove eventuais parâmetros de PII caso alguém passe na URL por engano
-    const piiParams = ["email", "e-mail", "phone", "telefone", "celular", "cpf", "document", "name", "nome", "address", "endereco", "cep"];
+    const piiParams = [
+      "email",
+      "e-mail",
+      "phone",
+      "telefone",
+      "celular",
+      "cpf",
+      "document",
+      "name",
+      "nome",
+      "address",
+      "endereco",
+      "cep"
+    ];
     for (const k of piiParams) {
       u.searchParams.delete(k);
     }
@@ -303,22 +371,22 @@ function buildMetaCapiPayload({
     userData.fbp = attr._fbp;
   }
 
-  const emHash = sha256Norm(cust.email, "email");
-  const phHash = sha256Norm(cust.phone, "phone");
-  const zpHash = sha256Norm(cust.cep, "cep");
-  const ctHash = sha256Norm(cust.city);
-  const stHash = sha256Norm(cust.state);
+  const emHash = cust.email_hash || sha256Norm(cust.email, "email");
+  const phHash = cust.phone_meta_hash || sha256Norm(cust.phone, "phone");
+  const zpHash = cust.zp_hash || sha256Norm(cust.cep, "cep");
+  const ctHash = cust.ct_hash || sha256Norm(cust.city);
+  const stHash = cust.st_hash || sha256Norm(cust.state);
   const countryHash = sha256Norm("br");
 
-  const fullName = String(cust.name || "").trim();
-  if (fullName) {
-    const parts = fullName.split(/\s+/);
-    const fnHash = sha256Norm(parts[0]);
-    const lnHash = parts.length > 1 ? sha256Norm(parts.slice(1).join(" ")) : null;
-    if (fnHash) userData.fn = [fnHash];
-    if (lnHash) userData.ln = [lnHash];
-  }
+  const fnHash = cust.fn_hash || (cust.name ? sha256Norm(String(cust.name).trim().split(/\s+/)[0]) : null);
+  const lnHash =
+    cust.ln_hash ||
+    (cust.name && String(cust.name).trim().split(/\s+/).length > 1
+      ? sha256Norm(String(cust.name).trim().split(/\s+/).slice(1).join(" "))
+      : null);
 
+  if (fnHash) userData.fn = [fnHash];
+  if (lnHash) userData.ln = [lnHash];
   if (emHash) userData.em = [emHash];
   if (phHash) userData.ph = [phHash];
   if (zpHash) userData.zp = [zpHash];
@@ -402,9 +470,9 @@ function buildTikTokEventsPayload({
     userObj.ttp = attr._ttp.trim();
   }
 
-  const emHash = sha256Norm(cust.email, "email");
-  const phHash = sha256Norm(cust.phone, "tiktok_phone");
-  const extHash = sha256Norm(externalId || cd.order_id || cust.email || "");
+  const emHash = cust.email_hash || sha256Norm(cust.email, "email");
+  const phHash = cust.phone_tiktok_hash || sha256Norm(cust.phone, "tiktok_phone");
+  const extHash = sha256Norm(externalId || cd.order_id || emHash || "");
 
   if (emHash) userObj.email = emHash;
   if (phHash) userObj.phone = phHash;
@@ -415,7 +483,7 @@ function buildTikTokEventsPayload({
     url: cleanUrl
   };
   if (attr.referrer && typeof attr.referrer === "string" && attr.referrer.trim()) {
-    pageObj.referrer = attr.referrer.trim();
+    pageObj.referrer = sanitizeEventUrl(attr.referrer, "");
   }
 
   const properties = {};
@@ -428,6 +496,7 @@ function buildTikTokEventsPayload({
       (Array.isArray(cd.content_ids) && cd.content_ids[0]) ||
       "HP-RIDER-01";
     const cname = cd.content_name || PRODUCT_NAMES.product1;
+    const ccat = cd.content_category || PRODUCT_CATEGORY;
     const val = typeof cd.value === "number" && !Number.isNaN(cd.value) ? cd.value : 29.9;
     const qty = Math.max(1, parseInt(cd.num_items || 1, 10) || 1);
     const unitPrice = Number((val / qty).toFixed(2));
@@ -437,11 +506,13 @@ function buildTikTokEventsPayload({
     properties.content_type = "product";
     properties.content_id = String(cid);
     properties.content_name = String(cname);
+    properties.content_category = String(ccat);
     properties.contents = [
       {
         content_id: String(cid),
         content_type: "product",
         content_name: String(cname),
+        content_category: String(ccat),
         quantity: qty,
         price: unitPrice
       }
@@ -534,9 +605,9 @@ async function dispatchTikTokEventsApi(payload) {
   }
 }
 
-function buildUtmifyPayload(orderRecord) {
+function buildUtmifyPayload(orderRecord, rawCustomer) {
   const attr = orderRecord.attribution || {};
-  const cust = orderRecord.customer || {};
+  const cust = rawCustomer || {};
   const statusMap = {
     paid: "paid",
     waiting_payment: "waiting_payment",
@@ -594,12 +665,12 @@ function buildUtmifyPayload(orderRecord) {
   };
 }
 
-async function dispatchUtmify(orderRecord) {
+async function dispatchUtmify(orderRecord, rawCustomer) {
   const cfg = getConfig();
-  const payload = buildUtmifyPayload(orderRecord);
   if (!cfg.utmifyToken) {
     return { sent: false, configured: false, reason: "UTMIFY_CREDENTIAL_NOT_CONFIGURED" };
   }
+  const payload = buildUtmifyPayload(orderRecord, rawCustomer);
   const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
   const timer = controller ? setTimeout(() => controller.abort(), 8000) : null;
   try {
@@ -664,31 +735,80 @@ function sendJson(res, statusCode, data) {
   res.end(body);
 }
 
+function verifyWebhookAuth(req, rawPayloadObj, secretKey) {
+  if (!secretKey) return true;
+  const sigHeader = String(
+    req.headers["x-bravo-signature"] ||
+      req.headers["x-webhook-secret"] ||
+      req.headers["x-webhook-token"] ||
+      req.headers["authorization"] ||
+      ""
+  ).trim();
+  if (!sigHeader) return false;
+
+  const cleanHeader = sigHeader.replace(/^Bearer\s+/i, "").trim();
+  try {
+    const a = Buffer.from(cleanHeader, "utf8");
+    const b = Buffer.from(secretKey, "utf8");
+    if (a.length === b.length && crypto.timingSafeEqual(a, b)) {
+      return true;
+    }
+  } catch (_) {}
+
+  try {
+    const hmac = crypto
+      .createHmac("sha256", secretKey)
+      .update(JSON.stringify(rawPayloadObj || {}), "utf8")
+      .digest("hex");
+    const a = Buffer.from(cleanHeader.toLowerCase(), "utf8");
+    const b = Buffer.from(hmac.toLowerCase(), "utf8");
+    if (a.length === b.length && crypto.timingSafeEqual(a, b)) {
+      return true;
+    }
+  } catch (_) {}
+
+  return false;
+}
+
 async function handlePaymentWebhook(req, res) {
   if (req.method !== "POST") {
     return sendJson(res, 405, { ok: false, error: "method_not_allowed" });
   }
+  const body = await readJsonBody(req);
   const cfg = getConfig();
-  if (cfg.webhookVerifyKey) {
-    const sig =
-      req.headers["x-bravo-signature"] ||
-      req.headers["x-webhook-secret"] ||
-      req.headers["authorization"] ||
-      "";
-    if (!sig || !sig.includes(cfg.webhookVerifyKey)) {
-      return sendJson(res, 401, { ok: false, error: "invalid_webhook_signature" });
-    }
+  if (cfg.webhookVerifyKey && !verifyWebhookAuth(req, body, cfg.webhookVerifyKey)) {
+    return sendJson(res, 401, { ok: false, error: "invalid_webhook_signature" });
   }
 
-  const body = await readJsonBody(req);
   const clientIp = getClientIp(req);
   const ua = req.headers["user-agent"] || "";
+  const nested = body.data && typeof body.data === "object" ? body.data : {};
 
   const orderId = String(
-    body.order_id || body.orderId || body.id || body.transaction_id || body.reference || ""
-  ).trim();
+    body.order_id ||
+      body.orderId ||
+      body.id ||
+      body.transaction_id ||
+      body.reference ||
+      nested.order_id ||
+      nested.orderId ||
+      nested.id ||
+      nested.transaction_id ||
+      nested.reference ||
+      ""
+  )
+    .trim()
+    .slice(0, 128);
+
   const rawStatus = String(
-    body.status || body.event || body.payment_status || body.state || ""
+    body.status ||
+      body.payment_status ||
+      body.state ||
+      nested.status ||
+      nested.payment_status ||
+      nested.state ||
+      body.event ||
+      ""
   )
     .trim()
     .toLowerCase();
@@ -701,11 +821,20 @@ async function handlePaymentWebhook(req, res) {
   const db = loadDb();
   const lastSess = db.last_session || {};
   let existing = db.orders[orderId];
+  const incomingRawCustomer = body.customer || nested.customer || null;
 
   if (!existing) {
-    const rawPid = body.product_id || body.product_sku || lastSess.product_id || "product1";
+    const rawPid =
+      body.product_id ||
+      body.product_sku ||
+      nested.product_id ||
+      nested.product_sku ||
+      lastSess.product_id ||
+      "product1";
     const canonical = resolveCanonicalProduct(rawPid) || resolveCanonicalProduct("product1");
-    const rawVal = Number(body.value || body.amount || lastSess.value || canonical.price);
+    const rawVal = Number(
+      body.value || body.amount || nested.value || nested.amount || lastSess.value || canonical.price
+    );
     const safeVal = !Number.isNaN(rawVal) && rawVal > 0 && rawVal <= 5000 ? rawVal : canonical.price;
 
     existing = {
@@ -713,11 +842,14 @@ async function handlePaymentWebhook(req, res) {
       product_id: canonical.id,
       product_sku: canonical.sku,
       product_name: canonical.name,
+      product_category: canonical.category,
       value: safeVal,
       currency: "BRL",
-      payment_method: body.payment_method || "pix",
-      customer: body.customer || lastSess.customer || {},
-      attribution: body.attribution || lastSess.attribution || {},
+      payment_method: body.payment_method || nested.payment_method || "pix",
+      customer: incomingRawCustomer
+        ? hashCustomerForStorage(incomingRawCustomer)
+        : lastSess.customer || {},
+      attribution: body.attribution || nested.attribution || lastSess.attribution || {},
       client_ip: lastSess.client_ip || clientIp,
       user_agent: lastSess.user_agent || ua,
       created_at: new Date().toISOString().replace("T", " ").slice(0, 19),
@@ -729,10 +861,16 @@ async function handlePaymentWebhook(req, res) {
       event_id: `purchase_${orderId}`
     };
     db.orders[orderId] = existing;
+  } else if (incomingRawCustomer) {
+    existing.customer = Object.assign(
+      {},
+      existing.customer || {},
+      hashCustomerForStorage(incomingRawCustomer)
+    );
   }
 
-  // Idempotência: se já foi pago e enviado para as APIs de conversão, bloqueia duplicidade
-  if ((existing.capi_purchase_sent || existing.tiktok_purchase_sent) && isApproved) {
+  // Idempotência: se ambos os envios de Purchase já foram concluídos para este pedido, bloqueia duplicidade
+  if (existing.capi_purchase_sent && existing.tiktok_purchase_sent && isApproved) {
     saveDb(db);
     return sendJson(res, 200, {
       ok: true,
@@ -745,11 +883,22 @@ async function handlePaymentWebhook(req, res) {
     });
   }
 
-  // Se NÃO for status aprovado (ex.: pix_generated, waiting_payment), NÃO dispara Purchase
+  // Se NÃO for status aprovado (ex.: pix_generated, waiting_payment, refused):
+  // Protege contra downgrade caso um webhook "waiting_payment" chegue fora de ordem após "paid"
   if (!isApproved) {
+    if (existing.paid && !REVERSAL_STATUSES.has(rawStatus)) {
+      return sendJson(res, 200, {
+        ok: true,
+        order_id: orderId,
+        status: existing.status,
+        paid: true,
+        purchase_dispatched: false,
+        ignored_out_of_order_status: rawStatus
+      });
+    }
     existing.status = NON_PURCHASE_STATUSES.has(rawStatus) ? rawStatus : "waiting_payment";
     existing.paid = false;
-    const utmRes = await dispatchUtmify(existing);
+    const utmRes = await dispatchUtmify(existing, incomingRawCustomer);
     db.utmify_log.push({
       order_id: orderId,
       status: existing.status,
@@ -767,13 +916,12 @@ async function handlePaymentWebhook(req, res) {
     });
   }
 
-  // Pagamento confirmado e aprovado -> Dispara Purchase 1 única vez (TikTok Events API + Meta CAPI + UTMify)
-  const eventTime = Math.floor(Date.now() / 1000);
+  // Pagamento confirmado e aprovado -> Preserva timestamp e event_id originais do pedido para idempotência e retry seguro
+  const eventTime = existing.purchase_event_time || Math.floor(Date.now() / 1000);
+  existing.purchase_event_time = eventTime;
   existing.paid = true;
   existing.status = "paid";
-  existing.approved_at = new Date().toISOString().replace("T", " ").slice(0, 19);
-  existing.capi_purchase_sent = true;
-  existing.tiktok_purchase_sent = true;
+  existing.approved_at = existing.approved_at || new Date().toISOString().replace("T", " ").slice(0, 19);
   const evId = existing.event_id || `purchase_${orderId}`;
   existing.event_id = evId;
   globalThis.__HP_TRACKING_MEM__.sentEventIds.add(evId);
@@ -784,12 +932,14 @@ async function handlePaymentWebhook(req, res) {
     currency: "BRL",
     content_id: existing.product_sku || "HP-RIDER-01",
     content_ids: [existing.product_sku || "HP-RIDER-01"],
+    content_category: existing.product_category || PRODUCT_CATEGORY,
     contents: [
       {
         id: existing.product_sku || "HP-RIDER-01",
         content_id: existing.product_sku || "HP-RIDER-01",
         content_type: "product",
         content_name: existing.product_name || PRODUCT_NAMES.product1,
+        content_category: existing.product_category || PRODUCT_CATEGORY,
         quantity: 1,
         item_price: Number(existing.value || 29.9),
         price: Number(existing.value || 29.9)
@@ -804,36 +954,52 @@ async function handlePaymentWebhook(req, res) {
   const eventSourceUrl =
     (existing.attribution || {}).landing_page || "https://hollowpaw-vercel-ready.vercel.app/obrigado";
 
-  const capiPayload = buildMetaCapiPayload({
-    eventName: "Purchase",
-    eventId: evId,
-    eventTime,
-    eventSourceUrl,
-    customData,
-    attribution: existing.attribution,
-    customer: existing.customer,
-    clientIp: existing.client_ip,
-    userAgent: existing.user_agent
-  });
+  const capiPromise = existing.capi_purchase_sent
+    ? Promise.resolve({ sent: true, skipped: "already_sent" })
+    : dispatchMetaCapi(
+        buildMetaCapiPayload({
+          eventName: "Purchase",
+          eventId: evId,
+          eventTime,
+          eventSourceUrl,
+          customData,
+          attribution: existing.attribution,
+          customer: existing.customer,
+          clientIp: existing.client_ip,
+          userAgent: existing.user_agent
+        })
+      );
 
-  const tiktokPayload = buildTikTokEventsPayload({
-    eventName: "Purchase",
-    eventId: evId,
-    eventTime,
-    eventSourceUrl,
-    customData,
-    attribution: existing.attribution,
-    customer: existing.customer,
-    clientIp: existing.client_ip,
-    userAgent: existing.user_agent,
-    externalId: orderId
-  });
+  const tiktokPromise = existing.tiktok_purchase_sent
+    ? Promise.resolve({ sent: true, skipped: "already_sent" })
+    : dispatchTikTokEventsApi(
+        buildTikTokEventsPayload({
+          eventName: "Purchase",
+          eventId: evId,
+          eventTime,
+          eventSourceUrl,
+          customData,
+          attribution: existing.attribution,
+          customer: existing.customer,
+          clientIp: existing.client_ip,
+          userAgent: existing.user_agent,
+          externalId: orderId
+        })
+      );
 
   const [capiRes, tiktokRes, utmRes] = await Promise.all([
-    dispatchMetaCapi(capiPayload),
-    dispatchTikTokEventsApi(tiktokPayload),
-    dispatchUtmify(existing)
+    capiPromise,
+    tiktokPromise,
+    dispatchUtmify(existing, incomingRawCustomer)
   ]);
+
+  // Marca como enviado quando aceito ou quando a credencial daquele destino não está configurada
+  if (capiRes.sent || capiRes.configured === false) {
+    existing.capi_purchase_sent = true;
+  }
+  if (tiktokRes.sent || tiktokRes.configured === false) {
+    existing.tiktok_purchase_sent = true;
+  }
 
   db.capi_log.push({
     event_name: "Purchase",
@@ -876,9 +1042,11 @@ module.exports = {
   PRODUCT_NAMES,
   PRODUCT_SKUS,
   PRODUCT_PRICES,
+  PRODUCT_CATEGORY,
   getConfig,
   resolveCanonicalProduct,
   sanitizeCustomData,
+  hashCustomerForStorage,
   loadDb,
   saveDb,
   buildMetaCapiPayload,

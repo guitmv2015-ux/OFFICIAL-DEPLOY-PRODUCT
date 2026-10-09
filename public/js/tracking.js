@@ -297,6 +297,7 @@
       (Array.isArray(d.content_ids) && d.content_ids[0]) ||
       "HP-RIDER-01";
     var cname = d.content_name || "Fantasia de Halloween Divertida para Pets";
+    var ccat = d.content_category || "Fantasia para Pets";
     var val = typeof d.value === "number" ? d.value : Number(d.value || 29.9);
     var qty = Math.max(1, parseInt(d.num_items || 1, 10) || 1);
     var unitPrice = Number((val / qty).toFixed(2));
@@ -304,11 +305,13 @@
       content_type: "product",
       content_id: String(cid),
       content_name: String(cname),
+      content_category: String(ccat),
       contents: [
         {
           content_id: String(cid),
           content_type: "product",
           content_name: String(cname),
+          content_category: String(ccat),
           quantity: qty,
           price: unitPrice
         }
@@ -518,12 +521,15 @@
       var cur = p.currency || "BRL";
       var val = Number(p.price);
       var cid = (p.tracking && p.tracking.contentId) || p.sku || p.id;
+      var ccat = p.category || "Fantasia para Pets";
       var id = eventId("vc_" + key);
 
       var payload = {
         content_ids: [cid],
+        content_id: cid,
         content_type: "product",
         content_name: p.name,
+        content_category: ccat,
         contents: [{ id: cid, quantity: 1, item_price: val }],
         value: val,
         currency: cur
@@ -557,12 +563,15 @@
       var itemTotal = Number((unitPrice * qty).toFixed(2));
       var cur = p.currency || "BRL";
       var cid = (p.tracking && p.tracking.contentId) || p.sku || p.id;
+      var ccat = p.category || "Fantasia para Pets";
       var id = eventId("atc_" + (p.id || productId));
 
       var payload = {
         content_ids: [cid],
+        content_id: cid,
         content_type: "product",
         content_name: p.name,
+        content_category: ccat,
         contents: [{ id: cid, quantity: qty, item_price: unitPrice }],
         num_items: qty,
         value: itemTotal,
@@ -582,18 +591,24 @@
       var p = resolveProduct(productId);
       if (!p) return false;
       lastInitiateCheckoutTs = now;
+      try {
+        sessionStorage.setItem("hp_last_ic_ts", String(now));
+      } catch (e) {}
 
       var qty = Math.max(1, parseInt(quantity, 10) || 1);
       var unitPrice = Number(p.price);
       var cartTotal = Number((unitPrice * qty).toFixed(2));
       var cur = p.currency || "BRL";
       var cid = (p.tracking && p.tracking.contentId) || p.sku || p.id;
+      var ccat = p.category || "Fantasia para Pets";
       var id = eventId("ic_" + (p.id || productId));
 
       var payload = {
         content_ids: [cid],
+        content_id: cid,
         contents: [{ id: cid, quantity: qty, item_price: unitPrice }],
         content_name: p.name,
+        content_category: ccat,
         content_type: "product",
         num_items: qty,
         value: cartTotal,
@@ -612,10 +627,14 @@
       var cartTotal = Number((unitPrice * qty).toFixed(2));
       var cur = p.currency || "BRL";
       var cid = (p.tracking && p.tracking.contentId) || p.sku || p.id;
+      var ccat = p.category || "Fantasia para Pets";
       var id = eventId("api_" + (p.id || productId));
 
       var payload = {
         content_ids: [cid],
+        content_id: cid,
+        content_name: p.name,
+        content_category: ccat,
         contents: [{ id: cid, quantity: qty, item_price: unitPrice }],
         content_type: "product",
         value: cartTotal,
@@ -633,6 +652,7 @@
         var evId = eventId("pao_" + pid);
         var sku = sd.product_sku || (p && p.sku) || "HP-RIDER-01";
         var name = sd.product_name || (p && p.name) || "Fantasia de Halloween Divertida para Pets";
+        var ccat = (p && p.category) || "Fantasia para Pets";
         var val = Number(sd.value || (p && p.price) || 29.9);
 
         ttTrack(
@@ -642,6 +662,7 @@
             content_id: sku,
             content_type: "product",
             content_name: name,
+            content_category: ccat,
             value: val,
             currency: "BRL",
             num_items: 1
@@ -686,6 +707,7 @@
       var val = Number(value) || (p ? Number(p.price) : 29.90);
       var cur = (p && p.currency) || "BRL";
       var cid = p ? ((p.tracking && p.tracking.contentId) || p.sku || p.id) : String(productId || "HP-RIDER-01");
+      var ccat = (p && p.category) || "Fantasia para Pets";
       var dedupEventId = canonicalEventId || ("purchase_" + orderId);
 
       memoryStore[storageKey] = dedupEventId;
@@ -698,14 +720,16 @@
         value: val,
         currency: cur,
         content_ids: [cid],
+        content_id: cid,
         contents: [{ id: cid, quantity: 1, item_price: val }],
         content_type: "product",
         content_name: p ? p.name : "Produto Hollowpaw",
+        content_category: ccat,
         num_items: 1,
         order_id: orderId
       };
 
-      /* syncCapi = false porque o backend/webhook já envia o Purchase via CAPI com o mesmo event_id */
+      /* syncCapi = false porque o backend/webhook já envia o Purchase via CAPI e TikTok Events API com o mesmo event_id */
       var ok = fbTrack("Purchase", payload, dedupEventId, false);
       gtagEvent("purchase", { transaction_id: orderId, currency: cur, value: val, items: p ? [item(p, 1)] : [] });
       return ok;
@@ -718,10 +742,30 @@
   HPTrack.pageView();
 
   /* --------------------------------------------------------------------------
-     5. Listeners Globais para Busca Real ([data-search-form]) e AddToCart
-        ([data-add-to-cart]) + Verificação Estrita de Purchase no Backend
+     5. Listeners Globais para Busca Real ([data-search-form]), AddToCart
+        ([data-add-to-cart]), ViewContent, InitiateCheckout Direto e
+        Verificação Estrita de Purchase no Backend
      -------------------------------------------------------------------------- */
-  document.addEventListener("DOMContentLoaded", function () {
+  function initDomTracking() {
+    var prodRoot = document.querySelector("[data-product-id]");
+    if (prodRoot) {
+      var pageProdId = prodRoot.getAttribute("data-product-id");
+      if (pageProdId) HPTrack.viewContent(pageProdId);
+    }
+
+    var deliveryForm = document.getElementById("delivery-info-form");
+    if (deliveryForm) {
+      var recentIc = 0;
+      try {
+        recentIc = parseInt(sessionStorage.getItem("hp_last_ic_ts") || "0", 10) || 0;
+      } catch (e) {}
+      if (Date.now() - recentIc > 15000) {
+        var qParams = new URLSearchParams(window.location.search);
+        var dlPid = qParams.get("produto") || qParams.get("product") || "product1";
+        HPTrack.initiateCheckout(dlPid, 1);
+      }
+    }
+
     document.addEventListener("submit", function (e) {
       var searchForm = e.target && e.target.closest ? e.target.closest("[data-search-form]") : null;
       if (!searchForm) return;
@@ -817,5 +861,11 @@
           log("Não foi possível verificar o status do pagamento no backend — Purchase não disparado por segurança.");
         });
     }
-  });
+  }
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", initDomTracking);
+  } else {
+    initDomTracking();
+  }
 })();

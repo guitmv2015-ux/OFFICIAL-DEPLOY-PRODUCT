@@ -1,14 +1,16 @@
 /**
  * Vercel Serverless Function: POST /api/orders/session
- * Salva os dados de entrega + parâmetros de atribuição (UTMs, ttclid, _ttp, fbclid, _fbp, _fbc, xcod, sck)
- * antes do redirecionamento ao checkout externo, e dispara o evento `PlaceAnOrder`
- * na TikTok Events API com o mesmo `event_id` gerado no navegador.
+ * Salva os hashes SHA-256 de correspondência do cliente + parâmetros de atribuição
+ * (UTMs, ttclid, _ttp, fbclid, _fbp, _fbc, xcod, sck) antes do redirecionamento ao checkout
+ * externo, e dispara o evento `PlaceAnOrder` na TikTok Events API com o mesmo `event_id`
+ * gerado no navegador.
  */
 "use strict";
 
 const {
   resolveCanonicalProduct,
   sanitizeCustomData,
+  hashCustomerForStorage,
   loadDb,
   saveDb,
   buildTikTokEventsPayload,
@@ -30,15 +32,17 @@ module.exports = async function handler(req, res) {
   const clientIp = getClientIp(req);
   const ua = req.headers["user-agent"] || "";
   const nowSec = Math.floor(Date.now() / 1000);
+  const hashedCustomer = hashCustomerForStorage(body.customer || {});
 
   const sessionRecord = {
     session_id: `sess_${nowSec}`,
     product_id: canonical.id,
     product_sku: canonical.sku,
     product_name: canonical.name,
+    product_category: canonical.category,
     value: canonical.price,
     currency: "BRL",
-    customer: body.customer || {},
+    customer: hashedCustomer,
     attribution: body.attribution || {},
     client_ip: clientIp,
     user_agent: ua,
@@ -59,10 +63,11 @@ module.exports = async function handler(req, res) {
       eventName: "PlaceAnOrder",
       eventId: evId,
       eventTime: nowSec,
-      eventSourceUrl: body.event_source_url || "https://hollowpaw-vercel-ready.vercel.app/informacoes-entrega",
+      eventSourceUrl:
+        body.event_source_url || "https://hollowpaw-vercel-ready.vercel.app/informacoes-entrega",
       customData: safeCustomData,
       attribution: sessionRecord.attribution,
-      customer: sessionRecord.customer,
+      customer: hashedCustomer,
       clientIp,
       userAgent: ua,
       externalId: sessionRecord.session_id
