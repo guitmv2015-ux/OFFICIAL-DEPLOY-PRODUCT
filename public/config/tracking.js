@@ -19,9 +19,10 @@ window.TRACKING_CONFIG = {
   GA4_ID: "",
   GTM_ID: "",
 
-  /* Endpoints Serverless (/api/* no Vercel) para CAPI, atribuição e validação de Purchase */
+  /* Endpoints Serverless (/api/* no Vercel) para TikTok Events API, CAPI, atribuição e validação de Purchase */
   API_ENDPOINTS: {
     EVENT: "/api/tracking/event",
+    TIKTOK_EVENTS: "/api/tiktok/events",
     ORDER_SESSION: "/api/orders/session",
     ORDER_STATUS: "/api/orders/status",
     ACK_PURCHASE: "/api/orders/ack-browser-purchase"

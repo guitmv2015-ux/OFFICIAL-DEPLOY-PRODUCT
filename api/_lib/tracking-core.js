@@ -1,8 +1,8 @@
 /**
- * HOLLOWPAW — Core Serverless de Tracking, Meta CAPI, Webhooks e UTMify
- * =====================================================================
+ * HOLLOWPAW — Core Serverless de Tracking, TikTok Events API, Meta CAPI, Webhooks e UTMify
+ * ========================================================================================
  * Compatível com Vercel Serverless Functions (Node.js 18/20/24+) e ambiente local.
- * Nenhuma credencial fica no código: todas as chaves vêm de `process.env`.
+ * Nenhuma credencial fica no código: todas as chaves vêm exclusivamente de `process.env`.
  */
 "use strict";
 
@@ -36,6 +36,12 @@ loadDotEnvIfNeeded();
 function getConfig() {
   const env = process.env;
   return {
+    tiktokPixelId: (env.TIKTOK_PIXEL_ID || "DB477NJC77U2NTDCJ9JG").trim(),
+    tiktokAccessToken: (env["TIKTOK_ACCESS_" + "TOKEN"] || "").trim(),
+    tiktokTestEventCode: (env.TIKTOK_TEST_EVENT_CODE || "").trim(),
+    tiktokApiUrl: (
+      env.TIKTOK_EVENTS_API_URL || "https://business-api.tiktok.com/open_api/v1.3/event/track/"
+    ).trim(),
     metaPixelId: (env.META_PIXEL_ID || "1576880640332577").trim(),
     metaAccessToken: (env["META_CAPI_ACCESS_" + "TOKEN"] || "").trim(),
     metaTestEventCode: (env.META_TEST_EVENT_CODE || "").trim(),
@@ -75,6 +81,16 @@ const NON_PURCHASE_STATUSES = new Set([
   "expired"
 ]);
 
+const ALLOWED_BROWSER_EVENTS = new Set([
+  "PageView",
+  "ViewContent",
+  "Search",
+  "AddToCart",
+  "InitiateCheckout",
+  "AddPaymentInfo",
+  "PlaceAnOrder"
+]);
+
 const PRODUCT_NAMES = {
   product1: "Fantasia de Halloween Divertida para Pets",
   product2: "Roupa de freira para pet",
@@ -86,6 +102,91 @@ const PRODUCT_SKUS = {
   product2: "HP-HABIT-01",
   product3: "HP-SPIDER-01"
 };
+
+const PRODUCT_PRICES = {
+  product1: 29.9,
+  product2: 29.9,
+  product3: 29.9
+};
+
+const SKU_TO_PRODUCT_ID = {
+  "HP-RIDER-01": "product1",
+  "HP-HABIT-01": "product2",
+  "HP-SPIDER-01": "product3",
+  "headless-rider": "product1",
+  "fantasia-freira": "product2",
+  "holy-habit": "product2",
+  "creepy-crawler": "product3",
+  "aranha-felpuda": "product3"
+};
+
+function resolveCanonicalProduct(rawKey) {
+  if (!rawKey) return null;
+  const key = String(rawKey).trim();
+  const pid = PRODUCT_NAMES[key] ? key : SKU_TO_PRODUCT_ID[key] || null;
+  if (!pid) return null;
+  return {
+    id: pid,
+    sku: PRODUCT_SKUS[pid],
+    name: PRODUCT_NAMES[pid],
+    price: PRODUCT_PRICES[pid],
+    currency: "BRL"
+  };
+}
+
+function sanitizeCustomData(eventName, rawCustomData, fallbackProductId) {
+  const raw = rawCustomData && typeof rawCustomData === "object" ? rawCustomData : {};
+  if (eventName === "PageView" || eventName === "Pageview") {
+    return {};
+  }
+  if (eventName === "Search") {
+    const q = String(raw.search_string || raw.query || "").trim().slice(0, 160);
+    return q ? { search_string: q, query: q } : {};
+  }
+
+  const rawCid =
+    (Array.isArray(raw.content_ids) && raw.content_ids[0]) ||
+    raw.content_id ||
+    (Array.isArray(raw.contents) && raw.contents[0] && (raw.contents[0].id || raw.contents[0].content_id)) ||
+    fallbackProductId ||
+    "product1";
+
+  const canonical = resolveCanonicalProduct(rawCid) || resolveCanonicalProduct("product1");
+  const rawQty =
+    (Array.isArray(raw.contents) && raw.contents[0] && raw.contents[0].quantity) ||
+    raw.num_items ||
+    raw.quantity ||
+    1;
+  const qty = Math.min(50, Math.max(1, parseInt(rawQty, 10) || 1));
+  const unitPrice = canonical.price;
+  const totalValue = Number((unitPrice * qty).toFixed(2));
+
+  const sanitized = {
+    content_ids: [canonical.sku],
+    content_id: canonical.sku,
+    content_type: "product",
+    content_name: canonical.name,
+    contents: [
+      {
+        id: canonical.sku,
+        content_id: canonical.sku,
+        content_type: "product",
+        content_name: canonical.name,
+        quantity: qty,
+        item_price: unitPrice,
+        price: unitPrice
+      }
+    ],
+    num_items: qty,
+    value: totalValue,
+    currency: "BRL"
+  };
+
+  if (raw.order_id) {
+    sanitized.order_id = String(raw.order_id).trim().slice(0, 128);
+  }
+  return sanitized;
+}
 
 function getDbFilePath() {
   if (process.env.VERCEL) {
@@ -103,7 +204,8 @@ function getDbFilePath() {
 if (!globalThis.__HP_TRACKING_MEM__) {
   globalThis.__HP_TRACKING_MEM__ = {
     sentEventIds: new Set(),
-    db: { orders: {}, last_session: null, capi_log: [], utmify_log: [] }
+    sentTikTokEventIds: new Set(),
+    db: { orders: {}, last_session: null, capi_log: [], tiktok_log: [], utmify_log: [] }
   };
 }
 
@@ -114,6 +216,7 @@ function loadDb() {
       const parsed = JSON.parse(fs.readFileSync(file, "utf8"));
       parsed.orders = parsed.orders || {};
       parsed.capi_log = parsed.capi_log || [];
+      parsed.tiktok_log = parsed.tiktok_log || [];
       parsed.utmify_log = parsed.utmify_log || [];
       globalThis.__HP_TRACKING_MEM__.db = parsed;
       return parsed;
@@ -142,6 +245,13 @@ function sha256Norm(val, mode = "text") {
       digits = "55" + digits;
     }
     v = digits;
+  } else if (mode === "tiktok_phone") {
+    let digits = v.replace(/\D+/g, "");
+    if (!digits) return null;
+    if ((digits.length === 10 || digits.length === 11) && !digits.startsWith("55")) {
+      digits = "55" + digits;
+    }
+    v = "+" + digits;
   } else if (mode === "cep") {
     v = v.replace(/\D+/g, "");
   }
@@ -149,9 +259,25 @@ function sha256Norm(val, mode = "text") {
   return crypto.createHash("sha256").update(v, "utf8").digest("hex");
 }
 
+function sanitizeEventUrl(rawUrl, fallbackUrl) {
+  const candidate = String(rawUrl || fallbackUrl || "https://hollowpaw-vercel-ready.vercel.app/").trim();
+  try {
+    const u = new URL(candidate);
+    // Remove eventuais parâmetros de PII caso alguém passe na URL por engano
+    const piiParams = ["email", "e-mail", "phone", "telefone", "celular", "cpf", "document", "name", "nome", "address", "endereco", "cep"];
+    for (const k of piiParams) {
+      u.searchParams.delete(k);
+    }
+    return u.toString();
+  } catch (_) {
+    return "https://hollowpaw-vercel-ready.vercel.app/";
+  }
+}
+
 function buildMetaCapiPayload({
   eventName,
   eventId,
+  eventTime,
   eventSourceUrl,
   customData,
   attribution,
@@ -200,12 +326,14 @@ function buildMetaCapiPayload({
   if (stHash) userData.st = [stHash];
   if (countryHash) userData.country = [countryHash];
 
+  const cleanUrl = sanitizeEventUrl(eventSourceUrl, attr.landing_page);
+
   const eventObj = {
     event_name: eventName,
-    event_time: Math.floor(Date.now() / 1000),
+    event_time: Number(eventTime) || Math.floor(Date.now() / 1000),
     event_id: eventId,
     action_source: "website",
-    event_source_url: eventSourceUrl || attr.landing_page || "https://www.hollowpaw.com.br/",
+    event_source_url: cleanUrl,
     user_data: userData,
     custom_data: customData || {}
   };
@@ -220,19 +348,189 @@ function buildMetaCapiPayload({
 async function dispatchMetaCapi(payload) {
   const cfg = getConfig();
   if (!cfg.metaAccessToken || !cfg.metaPixelId) {
-    return { sent: false, reason: "META_CAPI_CREDENTIAL_NOT_CONFIGURED", payload };
+    return { sent: false, configured: false, reason: "META_CAPI_CREDENTIAL_NOT_CONFIGURED" };
   }
   const url = `https://graph.facebook.com/${cfg.metaGraphVersion}/${cfg.metaPixelId}/events?access_token=${encodeURIComponent(cfg.metaAccessToken)}`;
+  const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
+  const timer = controller ? setTimeout(() => controller.abort(), 8000) : null;
   try {
     const resp = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload)
+      body: JSON.stringify(payload),
+      signal: controller ? controller.signal : undefined
     });
     const text = await resp.text();
-    return { sent: resp.ok, http_status: resp.status, response: text };
+    return { sent: resp.ok, configured: true, http_status: resp.status, response: text.slice(0, 500) };
   } catch (err) {
-    return { sent: false, error: String(err.message || err), payload };
+    return { sent: false, configured: true, error: String(err.message || err) };
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+/**
+ * Monta o payload oficial da TikTok Events API v1.3 (/open_api/v1.3/event/track/)
+ * seguindo estritamente a documentação oficial de Web Events e deduplicação por `event_id`.
+ */
+function buildTikTokEventsPayload({
+  eventName,
+  eventId,
+  eventTime,
+  eventSourceUrl,
+  customData,
+  attribution,
+  customer,
+  clientIp,
+  userAgent,
+  externalId
+}) {
+  const cfg = getConfig();
+  const attr = attribution || {};
+  const cust = customer || {};
+  const cd = customData || {};
+
+  const userObj = {
+    ip: clientIp || "0.0.0.0",
+    user_agent: userAgent || attr.user_agent || "Mozilla/5.0"
+  };
+
+  if (attr.ttclid && typeof attr.ttclid === "string" && attr.ttclid.trim()) {
+    userObj.ttclid = attr.ttclid.trim();
+  }
+  if (attr._ttp && typeof attr._ttp === "string" && attr._ttp.trim()) {
+    userObj.ttp = attr._ttp.trim();
+  }
+
+  const emHash = sha256Norm(cust.email, "email");
+  const phHash = sha256Norm(cust.phone, "tiktok_phone");
+  const extHash = sha256Norm(externalId || cd.order_id || cust.email || "");
+
+  if (emHash) userObj.email = emHash;
+  if (phHash) userObj.phone = phHash;
+  if (extHash) userObj.external_id = extHash;
+
+  const cleanUrl = sanitizeEventUrl(eventSourceUrl, attr.landing_page);
+  const pageObj = {
+    url: cleanUrl
+  };
+  if (attr.referrer && typeof attr.referrer === "string" && attr.referrer.trim()) {
+    pageObj.referrer = attr.referrer.trim();
+  }
+
+  const properties = {};
+  if (eventName === "Search") {
+    const q = String(cd.query || cd.search_string || "").trim();
+    if (q) properties.query = q;
+  } else if (eventName !== "PageView" && eventName !== "Pageview") {
+    const cid =
+      cd.content_id ||
+      (Array.isArray(cd.content_ids) && cd.content_ids[0]) ||
+      "HP-RIDER-01";
+    const cname = cd.content_name || PRODUCT_NAMES.product1;
+    const val = typeof cd.value === "number" && !Number.isNaN(cd.value) ? cd.value : 29.9;
+    const qty = Math.max(1, parseInt(cd.num_items || 1, 10) || 1);
+    const unitPrice = Number((val / qty).toFixed(2));
+
+    properties.currency = "BRL";
+    properties.value = val;
+    properties.content_type = "product";
+    properties.content_id = String(cid);
+    properties.content_name = String(cname);
+    properties.contents = [
+      {
+        content_id: String(cid),
+        content_type: "product",
+        content_name: String(cname),
+        quantity: qty,
+        price: unitPrice
+      }
+    ];
+    if (cd.order_id) {
+      properties.order_id = String(cd.order_id);
+    }
+  }
+
+  const normalizedEventName = eventName === "PageView" ? "Pageview" : eventName;
+
+  const eventItem = {
+    event: normalizedEventName,
+    event_time: Number(eventTime) || Math.floor(Date.now() / 1000),
+    event_id: String(eventId),
+    user: userObj,
+    page: pageObj,
+    properties
+  };
+
+  const body = {
+    event_source: "web",
+    event_source_id: cfg.tiktokPixelId,
+    data: [eventItem]
+  };
+
+  if (cfg.tiktokTestEventCode) {
+    body.test_event_code = cfg.tiktokTestEventCode;
+  }
+
+  return body;
+}
+
+/**
+ * Envia o evento para o endpoint oficial da TikTok Events API v1.3
+ * autenticando via header `Access-Token` a partir de `process.env.TIKTOK_ACCESS_TOKEN`.
+ * Nunca expõe o token nem PII nos logs ou no retorno.
+ */
+async function dispatchTikTokEventsApi(payload) {
+  const cfg = getConfig();
+  if (!cfg.tiktokAccessToken || !cfg.tiktokPixelId) {
+    return {
+      sent: false,
+      configured: false,
+      pixel_id: cfg.tiktokPixelId || null,
+      reason: "TIKTOK_ACCESS_TOKEN_NOT_CONFIGURED"
+    };
+  }
+
+  const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
+  const timer = controller ? setTimeout(() => controller.abort(), 8000) : null;
+
+  try {
+    const resp = await fetch(cfg.tiktokApiUrl, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Access-Token": cfg.tiktokAccessToken
+      },
+      body: JSON.stringify(payload),
+      signal: controller ? controller.signal : undefined
+    });
+
+    const rawText = await resp.text();
+    let parsed = null;
+    try {
+      parsed = JSON.parse(rawText);
+    } catch (_) {}
+
+    const apiCode = parsed && typeof parsed.code === "number" ? parsed.code : null;
+    const isSuccess = resp.ok && apiCode === 0;
+
+    return {
+      sent: isSuccess,
+      configured: true,
+      http_status: resp.status,
+      api_code: apiCode,
+      message: parsed && parsed.message ? String(parsed.message).slice(0, 200) : rawText.slice(0, 200),
+      request_id: (parsed && parsed.request_id) || null
+    };
+  } catch (err) {
+    const isAbort = err && err.name === "AbortError";
+    return {
+      sent: false,
+      configured: true,
+      error: isAbort ? "tiktok_events_api_timeout" : String(err.message || err).slice(0, 200)
+    };
+  } finally {
+    if (timer) clearTimeout(timer);
   }
 }
 
@@ -300,8 +598,10 @@ async function dispatchUtmify(orderRecord) {
   const cfg = getConfig();
   const payload = buildUtmifyPayload(orderRecord);
   if (!cfg.utmifyToken) {
-    return { sent: false, reason: "UTMIFY_CREDENTIAL_NOT_CONFIGURED", payload };
+    return { sent: false, configured: false, reason: "UTMIFY_CREDENTIAL_NOT_CONFIGURED" };
   }
+  const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
+  const timer = controller ? setTimeout(() => controller.abort(), 8000) : null;
   try {
     const resp = await fetch(cfg.utmifyUrl, {
       method: "POST",
@@ -309,12 +609,15 @@ async function dispatchUtmify(orderRecord) {
         "Content-Type": "application/json",
         "x-api-token": cfg.utmifyToken
       },
-      body: JSON.stringify(payload)
+      body: JSON.stringify(payload),
+      signal: controller ? controller.signal : undefined
     });
     const text = await resp.text();
-    return { sent: resp.ok, http_status: resp.status, response: text, payload };
+    return { sent: resp.ok, configured: true, http_status: resp.status, response: text.slice(0, 300) };
   } catch (err) {
-    return { sent: false, error: String(err.message || err), payload };
+    return { sent: false, configured: true, error: String(err.message || err).slice(0, 200) };
+  } finally {
+    if (timer) clearTimeout(timer);
   }
 }
 
@@ -372,7 +675,7 @@ async function handlePaymentWebhook(req, res) {
       req.headers["x-webhook-secret"] ||
       req.headers["authorization"] ||
       "";
-    if (sig && !sig.includes(cfg.webhookVerifyKey)) {
+    if (!sig || !sig.includes(cfg.webhookVerifyKey)) {
       return sendJson(res, 401, { ok: false, error: "invalid_webhook_signature" });
     }
   }
@@ -400,13 +703,17 @@ async function handlePaymentWebhook(req, res) {
   let existing = db.orders[orderId];
 
   if (!existing) {
-    const pid = body.product_id || lastSess.product_id || "product1";
+    const rawPid = body.product_id || body.product_sku || lastSess.product_id || "product1";
+    const canonical = resolveCanonicalProduct(rawPid) || resolveCanonicalProduct("product1");
+    const rawVal = Number(body.value || body.amount || lastSess.value || canonical.price);
+    const safeVal = !Number.isNaN(rawVal) && rawVal > 0 && rawVal <= 5000 ? rawVal : canonical.price;
+
     existing = {
       order_id: orderId,
-      product_id: pid,
-      product_sku: body.product_sku || lastSess.product_sku || PRODUCT_SKUS[pid] || "HP-RIDER-01",
-      product_name: body.product_name || lastSess.product_name || PRODUCT_NAMES[pid] || PRODUCT_NAMES.product1,
-      value: Number(body.value || body.amount || lastSess.value || 29.9),
+      product_id: canonical.id,
+      product_sku: canonical.sku,
+      product_name: canonical.name,
+      value: safeVal,
       currency: "BRL",
       payment_method: body.payment_method || "pix",
       customer: body.customer || lastSess.customer || {},
@@ -417,14 +724,15 @@ async function handlePaymentWebhook(req, res) {
       paid: false,
       status: "waiting_payment",
       capi_purchase_sent: false,
+      tiktok_purchase_sent: false,
       browser_purchase_fired: false,
       event_id: `purchase_${orderId}`
     };
     db.orders[orderId] = existing;
   }
 
-  // Idempotência: se já foi pago e enviado para CAPI, bloqueia duplicidade
-  if (existing.capi_purchase_sent && isApproved) {
+  // Idempotência: se já foi pago e enviado para as APIs de conversão, bloqueia duplicidade
+  if ((existing.capi_purchase_sent || existing.tiktok_purchase_sent) && isApproved) {
     saveDb(db);
     return sendJson(res, 200, {
       ok: true,
@@ -459,24 +767,32 @@ async function handlePaymentWebhook(req, res) {
     });
   }
 
-  // Pagamento confirmado e aprovado -> Dispara Purchase 1 única vez (CAPI + UTMify)
+  // Pagamento confirmado e aprovado -> Dispara Purchase 1 única vez (TikTok Events API + Meta CAPI + UTMify)
+  const eventTime = Math.floor(Date.now() / 1000);
   existing.paid = true;
   existing.status = "paid";
   existing.approved_at = new Date().toISOString().replace("T", " ").slice(0, 19);
   existing.capi_purchase_sent = true;
+  existing.tiktok_purchase_sent = true;
   const evId = existing.event_id || `purchase_${orderId}`;
   existing.event_id = evId;
   globalThis.__HP_TRACKING_MEM__.sentEventIds.add(evId);
+  globalThis.__HP_TRACKING_MEM__.sentTikTokEventIds.add(evId);
 
   const customData = {
     value: Number(existing.value || 29.9),
     currency: "BRL",
+    content_id: existing.product_sku || "HP-RIDER-01",
     content_ids: [existing.product_sku || "HP-RIDER-01"],
     contents: [
       {
         id: existing.product_sku || "HP-RIDER-01",
+        content_id: existing.product_sku || "HP-RIDER-01",
+        content_type: "product",
+        content_name: existing.product_name || PRODUCT_NAMES.product1,
         quantity: 1,
-        item_price: Number(existing.value || 29.9)
+        item_price: Number(existing.value || 29.9),
+        price: Number(existing.value || 29.9)
       }
     ],
     content_type: "product",
@@ -485,10 +801,14 @@ async function handlePaymentWebhook(req, res) {
     order_id: orderId
   };
 
+  const eventSourceUrl =
+    (existing.attribution || {}).landing_page || "https://hollowpaw-vercel-ready.vercel.app/obrigado";
+
   const capiPayload = buildMetaCapiPayload({
     eventName: "Purchase",
     eventId: evId,
-    eventSourceUrl: (existing.attribution || {}).landing_page || "https://www.hollowpaw.com.br/",
+    eventTime,
+    eventSourceUrl,
     customData,
     attribution: existing.attribution,
     customer: existing.customer,
@@ -496,20 +816,43 @@ async function handlePaymentWebhook(req, res) {
     userAgent: existing.user_agent
   });
 
-  const capiRes = await dispatchMetaCapi(capiPayload);
-  const utmRes = await dispatchUtmify(existing);
+  const tiktokPayload = buildTikTokEventsPayload({
+    eventName: "Purchase",
+    eventId: evId,
+    eventTime,
+    eventSourceUrl,
+    customData,
+    attribution: existing.attribution,
+    customer: existing.customer,
+    clientIp: existing.client_ip,
+    userAgent: existing.user_agent,
+    externalId: orderId
+  });
+
+  const [capiRes, tiktokRes, utmRes] = await Promise.all([
+    dispatchMetaCapi(capiPayload),
+    dispatchTikTokEventsApi(tiktokPayload),
+    dispatchUtmify(existing)
+  ]);
 
   db.capi_log.push({
     event_name: "Purchase",
     event_id: evId,
     order_id: orderId,
-    timestamp: Math.floor(Date.now() / 1000),
+    timestamp: eventTime,
     result: capiRes
+  });
+  db.tiktok_log.push({
+    event_name: "Purchase",
+    event_id: evId,
+    order_id: orderId,
+    timestamp: eventTime,
+    result: tiktokRes
   });
   db.utmify_log.push({
     order_id: orderId,
     status: "paid",
-    timestamp: Math.floor(Date.now() / 1000),
+    timestamp: eventTime,
     result: utmRes
   });
   saveDb(db);
@@ -522,18 +865,26 @@ async function handlePaymentWebhook(req, res) {
     purchase_dispatched: true,
     duplicate_prevented: false,
     event_id: evId,
+    tiktok: tiktokRes,
     capi: capiRes,
     utmify: utmRes
   });
 }
 
 module.exports = {
+  ALLOWED_BROWSER_EVENTS,
   PRODUCT_NAMES,
   PRODUCT_SKUS,
+  PRODUCT_PRICES,
+  getConfig,
+  resolveCanonicalProduct,
+  sanitizeCustomData,
   loadDb,
   saveDb,
   buildMetaCapiPayload,
   dispatchMetaCapi,
+  buildTikTokEventsPayload,
+  dispatchTikTokEventsApi,
   getClientIp,
   readJsonBody,
   sendJson,

@@ -1,16 +1,21 @@
 /**
  * Vercel Serverless Function: POST /api/tracking/event
- * Recebe eventos de funil (PageView, ViewContent, Search, AddToCart, InitiateCheckout)
- * e envia para a Meta Conversions API (CAPI) com o mesmo `event_id` do navegador.
+ * Recebe eventos de funil (PageView, ViewContent, Search, AddToCart, InitiateCheckout,
+ * AddPaymentInfo, PlaceAnOrder) e envia para a TikTok Events API (v1.3) e Meta Conversions API (CAPI)
+ * com o mesmo `event_id` do navegador para deduplicação exata.
  * Bloqueia qualquer tentativa de disparar `Purchase` diretamente sem confirmação de webhook.
  */
 "use strict";
 
 const {
+  ALLOWED_BROWSER_EVENTS,
+  sanitizeCustomData,
   loadDb,
   saveDb,
   buildMetaCapiPayload,
   dispatchMetaCapi,
+  buildTikTokEventsPayload,
+  dispatchTikTokEventsApi,
   getClientIp,
   readJsonBody,
   sendJson
@@ -23,16 +28,24 @@ module.exports = async function handler(req, res) {
 
   const body = await readJsonBody(req);
   const evName = String(body.event_name || "").trim();
-  const evId = String(body.event_id || "").trim();
+  const evId = String(body.event_id || "").trim().slice(0, 128);
 
   if (!evName || !evId) {
     return sendJson(res, 400, { ok: false, error: "missing_event_name_or_id" });
   }
 
-  if (evName.toLowerCase() === "purchase") {
+  const lowerName = evName.toLowerCase();
+  if (lowerName === "purchase" || lowerName === "completepayment") {
     return sendJson(res, 403, {
       ok: false,
       error: "purchase_requires_backend_payment_webhook_confirmation"
+    });
+  }
+
+  if (!ALLOWED_BROWSER_EVENTS.has(evName)) {
+    return sendJson(res, 400, {
+      ok: false,
+      error: "unsupported_event_name"
     });
   }
 
@@ -45,26 +58,60 @@ module.exports = async function handler(req, res) {
   const db = loadDb();
   const clientIp = getClientIp(req);
   const ua = body.user_agent || req.headers["user-agent"] || "";
+  const eventTime = Math.floor(Date.now() / 1000);
+  const safeCustomData = sanitizeCustomData(evName, body.custom_data, body.product_id);
+  const customer = (db.last_session || {}).customer || {};
 
   const capiPayload = buildMetaCapiPayload({
     eventName: evName,
     eventId: evId,
+    eventTime,
     eventSourceUrl: body.event_source_url,
-    customData: body.custom_data,
+    customData: safeCustomData,
     attribution: body.attribution,
-    customer: (db.last_session || {}).customer,
+    customer,
     clientIp,
     userAgent: ua
   });
+
+  // PageView no TikTok já é disparado 1x no navegador por `ttq.page()`;
+  // Todos os eventos de funil/conversão são enviados para a TikTok Events API com o mesmo `event_id`.
+  let tiktokRes = { sent: false, skipped: "pageview_handled_by_browser_pixel" };
+  if (evName !== "PageView") {
+    mem.sentTikTokEventIds.add(evId);
+    const tiktokPayload = buildTikTokEventsPayload({
+      eventName: evName,
+      eventId: evId,
+      eventTime,
+      eventSourceUrl: body.event_source_url,
+      customData: safeCustomData,
+      attribution: body.attribution,
+      customer,
+      clientIp,
+      userAgent: ua
+    });
+    tiktokRes = await dispatchTikTokEventsApi(tiktokPayload);
+    db.tiktok_log.push({
+      event_name: evName,
+      event_id: evId,
+      timestamp: eventTime,
+      result: tiktokRes
+    });
+  }
 
   const capiRes = await dispatchMetaCapi(capiPayload);
   db.capi_log.push({
     event_name: evName,
     event_id: evId,
-    timestamp: Math.floor(Date.now() / 1000),
+    timestamp: eventTime,
     result: capiRes
   });
   saveDb(db);
 
-  return sendJson(res, 200, { ok: true, event_id: evId, capi: capiRes });
+  return sendJson(res, 200, {
+    ok: true,
+    event_id: evId,
+    tiktok: tiktokRes,
+    capi: capiRes
+  });
 };

@@ -140,6 +140,12 @@
       merged._fbp = fbpCookie;
     }
 
+    /* Preserva _ttp do cookie do TikTok Pixel quando disponível */
+    var ttpCookie = getCookie("_ttp");
+    if (ttpCookie) {
+      merged._ttp = ttpCookie;
+    }
+
     if (!merged.landing_page) {
       merged.landing_page = window.location.href;
     }
@@ -156,8 +162,10 @@
   function getAttribution() {
     var fbp = getCookie("_fbp");
     var fbc = getCookie("_fbc");
+    var ttp = getCookie("_ttp");
     if (fbp) currentAttribution._fbp = fbp;
     if (fbc) currentAttribution._fbc = fbc;
+    if (ttp) currentAttribution._ttp = ttp;
     saveAttribution(currentAttribution);
     return Object.assign({}, currentAttribution);
   }
@@ -275,9 +283,57 @@
   }
 
   /* --------------------------------------------------------------------------
-     3. Helpers de Disparo (Browser Pixel + Backend CAPI não-bloqueante)
+     3. Helpers de Disparo (Browser Pixel + Backend CAPI / TikTok Events API)
      -------------------------------------------------------------------------- */
   var sentEventIds = {};
+
+  function buildTikTokBrowserProps(eventName, data) {
+    var d = data || {};
+    if (eventName === "Search") {
+      return { query: String(d.search_string || d.query || "").trim() };
+    }
+    var cid =
+      d.content_id ||
+      (Array.isArray(d.content_ids) && d.content_ids[0]) ||
+      "HP-RIDER-01";
+    var cname = d.content_name || "Fantasia de Halloween Divertida para Pets";
+    var val = typeof d.value === "number" ? d.value : Number(d.value || 29.9);
+    var qty = Math.max(1, parseInt(d.num_items || 1, 10) || 1);
+    var unitPrice = Number((val / qty).toFixed(2));
+    var props = {
+      content_type: "product",
+      content_id: String(cid),
+      content_name: String(cname),
+      contents: [
+        {
+          content_id: String(cid),
+          content_type: "product",
+          content_name: String(cname),
+          quantity: qty,
+          price: unitPrice
+        }
+      ],
+      value: val,
+      currency: d.currency || "BRL"
+    };
+    if (d.order_id) {
+      props.order_id = String(d.order_id);
+    }
+    return props;
+  }
+
+  function ttTrack(eventName, data, evId) {
+    if (!window.ttq || typeof window.ttq.track !== "function") return;
+    if (eventName === "PageView" || eventName === "Pageview") return;
+    try {
+      var ttProps = buildTikTokBrowserProps(eventName, data);
+      if (evId) {
+        window.ttq.track(eventName, ttProps, { event_id: evId });
+      } else {
+        window.ttq.track(eventName, ttProps);
+      }
+    } catch (e) {}
+  }
 
   function sendToBackendCapi(eventName, data, evId) {
     try {
@@ -320,6 +376,9 @@
         }
       }
     } catch (e) {}
+
+    /* Dispara no TikTok Pixel do navegador com o MESMO event_id para deduplicação com a TikTok Events API */
+    ttTrack(eventName, data, evId);
 
     window.dataLayer.push({
       event: "meta_" + eventName.toLowerCase(),
@@ -535,10 +594,33 @@
       return fbTrack("AddPaymentInfo", payload, id, true);
     },
 
-    /* Registra sessão de pedido/entrega no backend sem bloquear o redirecionamento */
+    /* Registra sessão de pedido/entrega no backend e dispara PlaceAnOrder com event_id deduplicado */
     recordOrderSession: function (sessionData) {
       try {
-        var payload = JSON.stringify(Object.assign({}, sessionData || {}, {
+        var sd = sessionData || {};
+        var pid = sd.product_id || "product1";
+        var p = resolveProduct(pid) || resolveProduct("product1");
+        var evId = eventId("pao_" + pid);
+        var sku = sd.product_sku || (p && p.sku) || "HP-RIDER-01";
+        var name = sd.product_name || (p && p.name) || "Fantasia de Halloween Divertida para Pets";
+        var val = Number(sd.value || (p && p.price) || 29.9);
+
+        ttTrack(
+          "PlaceAnOrder",
+          {
+            content_ids: [sku],
+            content_id: sku,
+            content_type: "product",
+            content_name: name,
+            value: val,
+            currency: "BRL",
+            num_items: 1
+          },
+          evId
+        );
+
+        var payload = JSON.stringify(Object.assign({}, sd, {
+          event_id: evId,
           attribution: getAttribution(),
           event_source_url: window.location.href
         }));
